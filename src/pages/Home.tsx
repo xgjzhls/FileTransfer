@@ -9,6 +9,7 @@ import { RtcPeer } from '../webrtc/peer'
 import { TransferController } from '../transfer/controller'
 import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
+import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
 import type { FileMeta } from '../protocol/transfer'
 import type { DeviceKind, PeerInfo } from '../protocol/signaling'
 
@@ -53,6 +54,9 @@ export default function Home() {
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [wsState, setWsState] = useState<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>('idle')
+  const [diagIps, setDiagIps] = useState<string[]>([])
+  const [diagMsg, setDiagMsg] = useState('')
 
   // 传输状态
   const [sendItems, setSendItems] = useState<SendItem[]>([])
@@ -197,19 +201,47 @@ export default function Home() {
   function joinRoom(code: string) {
     setRoom(code)
     setError('')
+    setWsState('connecting')
     const ws = createBrowserSocket(`${SIGNALING_WSS}?room=${code}`)
     const client = new SignalingClient(ws, signalEvents)
     signalRef.current = client
     ws.on('open', () => {
       client.join(code, device)
+      setWsState('connected')
       setStatus(`已加入房间 ${code}`)
     })
+    ws.on('error', () => {
+      setWsState('error')
+      setError('信令连接失败：无法连接信令服务（检查 Wi-Fi / 证书信任 / 服务是否运行）')
+      setConnState('idle')
+    })
     ws.on('close', () => {
+      setWsState('disconnected')
       setPeers([])
       setConnState('idle')
       setStatus('信令连接已断开')
     })
   }
+
+  /** 诊断：收集本机 WebRTC 候选 IP（连接失败时定位网络问题） */
+  async function runDiag() {
+    setDiagMsg('收集中…')
+    try {
+      const ips = await collectLocalCandidates()
+      setDiagIps(ips)
+      setDiagMsg(ips.length > 0 ? '' : '未收集到候选（浏览器/网络异常）')
+    } catch (e) {
+      setDiagMsg(`收集失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  // 连接失败时自动收集候选（定位 fake-ip / mDNS / 路由器过滤）
+  useEffect(() => {
+    if (connState === 'failed' || connState === 'disconnected') {
+      void runDiag()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connState])
 
   async function connectTo(peerId: string) {
     setError('')
@@ -339,6 +371,29 @@ export default function Home() {
         </div>
         {status && <p>{status}</p>}
         {error && <p className="bad">{error}</p>}
+
+        <details style={{ marginTop: 8 }}>
+          <summary className="muted" style={{ cursor: 'pointer' }}>诊断（信令 / 本机候选 IP）</summary>
+          <p className="mono" style={{ fontSize: 12 }}>
+            信令：{wsState} · {SIGNALING_WSS || '未配置'}
+          </p>
+          <div className="row">
+            <button onClick={() => void runDiag()} style={{ padding: '6px 10px', fontSize: 12 }}>
+              收集本机候选 IP
+            </button>
+          </div>
+          {diagMsg && <p className="muted">{diagMsg}</p>}
+          {diagIps.length > 0 && (
+            <ul className="mono" style={{ fontSize: 12, margin: '6px 0', paddingLeft: 18 }}>
+              {diagIps.map((ip) => (
+                <li key={ip}>{describeCandidateIp(ip)}</li>
+              ))}
+            </ul>
+          )}
+          <p className="muted" style={{ fontSize: 12 }}>
+            mDNS 名（xxx.local）依赖路由器组播解析；198.18.x.x 是 Clash fake-ip。
+          </p>
+        </details>
       </section>
 
       <section className="card">
