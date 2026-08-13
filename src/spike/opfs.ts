@@ -34,19 +34,36 @@ const CAP = 64 * 1024 * 1024 * 1024 // safety cap: 64 GB
 export async function clearOpfsTestData(): Promise<{ removed: string[]; freedBytes: number }> {
   const opfsAvailable = 'storage' in navigator && typeof navigator.storage.getDirectory === 'function'
   if (!opfsAvailable) throw new Error('OPFS 不可用')
-  const before = await navigator.storage.estimate()
+
   const root = await navigator.storage.getDirectory()
-  const removed: string[] = []
+  // Collect names first, then remove: WebKit invalidates iterator state when
+  // the directory is mutated mid-iteration ("state cached in an interface
+  // object" error).
+  const names: string[] = []
   for await (const [name] of (root as FileSystemDirectoryHandle).entries()) {
+    names.push(name)
+  }
+
+  let freedBytes = 0
+  const removed: string[] = []
+  for (const name of names) {
     try {
+      // Best-effort size for files (iOS navigator.storage.estimate() returns 0).
+      try {
+        const handle = await root.getFileHandle(name)
+        const file = await handle.getFile()
+        freedBytes += file.size
+      } catch {
+        /* directory or unreadable — ignore */
+      }
       await root.removeEntry(name, { recursive: true })
       removed.push(name)
     } catch (e) {
       removed.push(`${name}（移除失败：${e instanceof Error ? e.message : String(e)}）`)
     }
   }
-  const after = await navigator.storage.estimate()
-  return { removed, freedBytes: (before.usage ?? 0) - (after.usage ?? 0) }
+
+  return { removed, freedBytes }
 }
 
 export async function runOpfsQuotaTest(
