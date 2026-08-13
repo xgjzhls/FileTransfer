@@ -21,11 +21,10 @@
 | `src/` `public/` `docs/` | T01 应用骨架（React + TS7 + Vite + PWA）；`docs/` 是构建产物（Pages 部署源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ `d889f56`，T02 ✅ `704ffde`，T03 代码 ✅ `4a00fe6`）
-- **下一步：T03 部署**（人类步骤，见下）→ 完成后即可开始 T04（WebRTC tracer bullet）
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅，T02 ✅ `704ffde`，T03 ✅ `4a00fe6` + 线上部署）
+- **下一步：T04 WebRTC 连接（tracer bullet）**—— 信令已部署可用（`wss://localtransfer-signaling.dirichray.workers.dev/ws`，.env 已填）
 - 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08（详见各票）
 - T02 遗留：验收标准 6 真机复测（iPhone 写入 1GB+ 并拼接）待用户设备执行；`npm test` 37/37 绿
-- T03 遗留：验收标准 4 部署（wrangler login + deploy → 填 .env → 对 wss 重跑 `node server/smoke.mjs`）
 
 ## 新电脑环境搭建（关键，按序执行）
 1. Node ≥ 22（项目在 v24.12.0 上构建验证）；克隆仓库后 `npm install`

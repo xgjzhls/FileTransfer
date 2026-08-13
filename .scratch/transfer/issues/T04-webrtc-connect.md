@@ -1,9 +1,10 @@
 # T04: WebRTC 连接（tracer bullet）—— 发现 → signal → DataChannel → meta
 
-- 状态：待实现
+- 状态：✅ 代码完成（src/signaling/ + src/webrtc/ + Home 房间 UI；76 单测）；⚠️ 验收 5 双浏览器冒烟待用户
 - 阻塞：T01, T03
 - 被阻塞者：T05, T07
 - 引用：SPEC §3.2/§3.3/§5
+- 完成备注：`npm test` 76/76；RtcPeer（可注入 pc 单测）握手/状态机/压缩 sdp 已测；ConnectionManager 握手流与 meta 收发已测；验收 5 需用户开两个浏览器标签（dev server http://localhost:5173 已就绪）
 
 ## 目标
 垂直打通最小闭环：两台设备通过信令发现彼此 → 交换 SDP → DataChannel 建立 → meta 消息互通（文件清单）。本票不传文件数据。

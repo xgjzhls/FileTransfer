@@ -1,10 +1,10 @@
 # T03: 信令服务 —— Cloudflare Workers 房间
 
-- 状态：✅ 代码完成（server/：index + Room DO + RoomCore + roomCode；37 单测含 11 信令；本地冒烟 8/8）；⚠️ 待部署（人类步骤）
+- 状态：✅ 已完成（代码 + 部署 + 线上冒烟）
 - 阻塞：无（需要用户提供 Cloudflare 账号——人类步骤）
 - 被阻塞者：T04
 - 引用：SPEC §5；ADR-0004
-- 完成备注：`npm test` 37/37；`node server/smoke.mjs` 对本地 wrangler dev 8/8 通过；验收 4（部署到 CF + wss URL 写前端 .env）未完成，待用户 wrangler login + deploy
+- 完成备注：`npm test` 37/37；线上 `https://localtransfer-signaling.dirichray.workers.dev` 已部署，`node server/smoke.mjs` 8/8 PASS；前端 .env 已填 `VITE_SIGNALING_WSS`
 
 ## 目标
 互联网侧轻量信令服务：房间（短码）、presence 广播、signal 转发。纯转发不落盘，数据面永不接触。
