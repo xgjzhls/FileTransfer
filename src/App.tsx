@@ -30,6 +30,8 @@ function App() {
   const [opfsRunning, setOpfsRunning] = useState(false)
   const [opfsProgress, setOpfsProgress] = useState(0)
   const [opfsResult, setOpfsResult] = useState<OpfsQuotaResult | null>(null)
+  const [cleaning, setCleaning] = useState(false)
+  const [cleanResult, setCleanResult] = useState('')
 
   // ---- Test 2: SW streamed download ----
   const [streamSize, setStreamSize] = useState<number>(1 * 1024 * 1024 * 1024)
@@ -73,6 +75,32 @@ function App() {
     controlled: '已控制 ✓',
     uncontrolled: '未控制（点重载）',
   }[swState]
+
+  async function handleCleanup() {
+    setCleaning(true)
+    setCleanResult('清理中…')
+    try {
+      const r = await clearOpfsTestData()
+      setCleanResult(`已移除 ${r.removed.length} 项：${r.removed.join(', ') || '（无）'}；释放 ${fmtBytes(r.freedBytes)}`)
+    } catch (e) {
+      setCleanResult(`清理失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setCleaning(false)
+    }
+  }
+
+  async function handleCleanup() {
+    setCleaning(true)
+    setCleanResult('清理中…')
+    try {
+      const r = await clearOpfsTestData()
+      setCleanResult(`已移除 ${r.removed.length} 项：${r.removed.join(', ') || '（无）'}；释放 ${fmtBytes(r.freedBytes)}`)
+    } catch (e) {
+      setCleanResult(`清理失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setCleaning(false)
+    }
+  }
 
   async function handleOpfsTest() {
     setOpfsRunning(true)
@@ -143,6 +171,7 @@ function App() {
 
       <Card title="测试 1：OPFS 配额（10GB 存得下吗）">
         <p>向 OPFS 持续写入直到失败，测出真实容量上限（含 persist() 前后对比）。会写掉不少磁盘空间，测试完自动清理。</p>
+        <p className="bad">⚠️ 若测试中途关闭页面/被系统终止，写入的文件会残留在 OPFS（沙盒内，不可见、不自动清理）——用下面的红色按钮清除。</p>
         <button onClick={handleOpfsTest} disabled={opfsRunning}>
           {opfsRunning ? '写入中…' : '开始 OPFS 配额测试'}
         </button>
@@ -160,10 +189,16 @@ function App() {
               `estimate 后: usage ${fmtBytes(opfsResult.estimateAfter?.usage ?? 0)} / quota ${fmtBytes(opfsResult.estimateAfter?.quota ?? 0)}`,
               `最大写入: ${fmtBytes(opfsResult.maxBytes)}`,
               `耗时: ${(opfsResult.durationMs / 1000).toFixed(1)}s，平均 ${opfsResult.mbPerSec.toFixed(0)} MB/s`,
-              opfsResult.hitCap ? '达到安全上限（128GB）未触发配额' : `错误: ${opfsResult.error ?? '（无，写满至上限）'}`,
+              opfsResult.hitCap ? '达到安全上限（64GB）未触发配额' : `错误: ${opfsResult.error ?? '（无，写满至上限）'}`,
             ].join('\n')}
           </pre>
         )}
+        <div className="row" style={{ marginTop: 12 }}>
+          <button onClick={handleCleanup} disabled={cleaning} style={{ background: '#ff453a' }}>
+            {cleaning ? '清理中…' : '⚠️ 清理 OPFS 测试数据（释放磁盘）'}
+          </button>
+        </div>
+        {cleanResult && <p>{cleanResult}</p>}
       </Card>
 
       <Card title="测试 2：SW 流式下载（能否绕过 OPFS 直落「文件」App）">

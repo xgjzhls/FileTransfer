@@ -24,6 +24,31 @@ export interface OpfsQuotaResult {
 const CHUNK = 64 * 1024 * 1024 // 64 MB per write
 const CAP = 64 * 1024 * 1024 * 1024 // safety cap: 64 GB
 
+/**
+ * Cleanup helper: delete every entry in the OPFS root.
+ *
+ * Interrupted tests (page/tab closed mid-write) leave quota-test.bin behind
+ * inside the origin sandbox — invisible to the user, still consuming disk.
+ * This lets them reclaim it without touching Safari settings.
+ */
+export async function clearOpfsTestData(): Promise<{ removed: string[]; freedBytes: number }> {
+  const opfsAvailable = 'storage' in navigator && typeof navigator.storage.getDirectory === 'function'
+  if (!opfsAvailable) throw new Error('OPFS 不可用')
+  const before = await navigator.storage.estimate()
+  const root = await navigator.storage.getDirectory()
+  const removed: string[] = []
+  for await (const [name] of (root as FileSystemDirectoryHandle).entries()) {
+    try {
+      await root.removeEntry(name, { recursive: true })
+      removed.push(name)
+    } catch (e) {
+      removed.push(`${name}（移除失败：${e instanceof Error ? e.message : String(e)}）`)
+    }
+  }
+  const after = await navigator.storage.estimate()
+  return { removed, freedBytes: (before.usage ?? 0) - (after.usage ?? 0) }
+}
+
 export async function runOpfsQuotaTest(
   onProgress: (writtenBytes: number) => void,
 ): Promise<OpfsQuotaResult> {
