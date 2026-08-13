@@ -71,6 +71,11 @@ export class ConnectionManager {
     }
   }
 
+  /** 等待 DataChannel open（发送前调用） */
+  async waitChannel(timeoutMs?: number): Promise<void> {
+    if (this.peer) await this.peer.waitChannel(timeoutMs)
+  }
+
   close(): void {
     this.peer?.close()
     this.peer = null

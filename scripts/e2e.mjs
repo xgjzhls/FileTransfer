@@ -94,8 +94,8 @@ try {
   const srcPath = join(dir, 'e2e-source.bin')
   writeFileSync(srcPath, randomBytes(3 * 1024 * 1024))
 
-  const ctxA = await browser.newContext()
-  const ctxB = await browser.newContext()
+  const ctxA = await browser.newContext({ ignoreHTTPSErrors: true })
+  const ctxB = await browser.newContext({ ignoreHTTPSErrors: true })
   await ctxB.addInitScript(() => localStorage.setItem('lt.deviceName', 'E2E-B'))
   const pageA = await ctxA.newPage()
   const pageB = await ctxB.newPage()
@@ -125,25 +125,24 @@ try {
   })
   step('A 设备列表出现 B', true)
 
-  // ── 4. A 点连接 → 信令 offer/answer 交换
+  // ── 4. A 点连接 → 两端 connected（修复 gather 后连接很快，不中途等 signaling）
   await pageA.getByRole('button', { name: '连接' }).click()
-  await waitStatus(pageA, 'signaling')
-  await waitStatus(pageB, 'signaling')
-  step('A 点连接：两端进入 signaling（offer/answer 已交换）', true)
-
   if (webrtcOk) {
     await waitStatus(pageA, 'connected')
     await waitStatus(pageB, 'connected')
-    step('两端状态 connected', true)
+    step('A 点连接：两端状态 connected', true)
 
-    // ── 5. A 选文件发送 → B 接收完成
+    // ── 5. A 选文件发送 → B 接收完成（B 端显示「导出」按钮）
     await pageA.setInputFiles('input[type="file"]', srcPath)
     await pageA.getByRole('button', { name: '开始发送' }).click()
-    await pageB.waitForFunction(() => document.body.textContent?.includes('完成 ✓'), null, {
+    await pageB.waitForFunction(() => document.body.textContent?.includes('导出'), null, {
       timeout: 60000,
     })
-    step('文件传输，B 端显示完成 ✓', true, '3 MiB')
+    step('文件传输，B 端接收完成（显示导出）', true, '3 MiB')
   } else {
+    await waitStatus(pageA, 'signaling')
+    await waitStatus(pageB, 'signaling')
+    step('（降级）A 点连接：两端进入 signaling（offer/answer 已交换）', true)
     step('（降级）WebRTC connected + 传输断言跳过', true, '环境不支持同机 ICE')
   }
 

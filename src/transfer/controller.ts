@@ -31,6 +31,7 @@ export class TransferController {
   private readonly transport: ChunkTransport
   private readonly events: ControllerEvents
   private sender: Sender | null = null
+  private lastSend: { files: { id: number; name: string; size: number; source: FileSource }[]; signal?: AbortSignal } | null = null
 
   constructor(sink: PartSink, transport: ChunkTransport, events: ControllerEvents) {
     this.transport = transport
@@ -38,7 +39,10 @@ export class TransferController {
     this.receiver = new Receiver(
       sink,
       (msg) => this.sendControl(msg),
-      { onProgress: (f, p, r, t) => this.events.onRecvProgress(f, p, r, t) },
+      {
+        onProgress: (f, p, r, t) => this.events.onRecvProgress(f, p, r, t),
+        onFileDone: (f) => this.events.onFileDone(f),
+      },
     )
   }
 
@@ -76,6 +80,7 @@ export class TransferController {
       },
     )
     this.sender = sender
+    this.lastSend = { files, signal }
     return sender.send(
       files.map((f) => ({ id: f.id, size: f.size, source: f.source })),
       signal,
@@ -125,7 +130,12 @@ export class TransferController {
         this.events.onFileDone(msg.fileId)
         break
       case 'part_reset':
-        this.sender?.requestReset(msg.fileId, msg.partIndex)
+        if (this.sender) {
+          this.sender.requestReset(msg.fileId, msg.partIndex)
+        } else if (this.lastSend) {
+          // sender 已结束（发送完成）后才收到重置请求：重启整批（meta 重发，Receiver 幂等）
+          void this.startSend(this.lastSend.files, this.lastSend.signal)
+        }
         break
     }
   }

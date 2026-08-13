@@ -9,7 +9,7 @@
 import { encodeChunk } from './framing'
 import { PART_SIZE, planParts } from '../webrtc/transferMeta'
 
-export const CHUNK_SIZE = 1024 * 1024 // SPEC §3.1: 1 MiB
+export const CHUNK_SIZE = 256 * 1024 - 64 // 256KiB 留帧头余量（13B 头 + payload ≤ maxMessageSize 262144）
 export const BACKPRESSURE_LIMIT = 8 * 1024 * 1024 // SPEC §3.1: >8MiB 暂停
 
 /** 文件字节来源（浏览器侧用 File：slice → arrayBuffer） */

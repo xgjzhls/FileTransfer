@@ -8,6 +8,7 @@ import { ConnectionManager } from '../webrtc/connection'
 import { RtcPeer } from '../webrtc/peer'
 import { TransferController } from '../transfer/controller'
 import { classifyExport, guessMime } from '../transfer/export'
+import { CHUNK_SIZE } from '../transfer/sender'
 import type { FileMeta } from '../protocol/transfer'
 import type { DeviceKind, PeerInfo } from '../protocol/signaling'
 
@@ -111,7 +112,6 @@ export default function Home() {
           onMeta: (files, sid) => {
             setSessionId(sid)
             recvMetaRef.current = files
-            const totalChunks = files.reduce((sum, f) => sum + f.parts.reduce((s, p) => s + Math.max(1, Math.ceil(p.size / (1024 * 1024))), 0), 0)
             setRecvItems(
               files.map((f) => ({
                 id: f.id,
@@ -119,11 +119,10 @@ export default function Home() {
                 size: f.size,
                 status: 'receiving',
                 receivedChunks: 0,
-                totalChunks: Math.max(1, Math.ceil(f.size / (1024 * 1024))),
+                totalChunks: Math.max(1, Math.ceil(f.size / CHUNK_SIZE)),
               })),
             )
             setStatus(`收到 ${files.length} 个文件的清单，开始接收`)
-            void totalChunks
           },
           onProgress: (fileId, sent, total) => {
             setSendItems((prev) =>
@@ -238,6 +237,13 @@ export default function Home() {
     setError('')
     setStatus('发送中…')
     abortRef.current = new AbortController()
+    // 等 DataChannel open，避免首帧（meta）被丢
+    try {
+      await managerRef.current?.waitChannel(10_000)
+    } catch {
+      setStatus('数据通道未就绪，请重试')
+      return
+    }
     const sources = items.map((it) => ({
       id: it.id,
       name: it.file.name,

@@ -90,7 +90,21 @@ describe('Receiver — chunk 落盘与 part 完成（SPEC §3.4）', () => {
     expect(sink.writeChunk).not.toHaveBeenCalled()
   })
 
-  it('0 字节 part：1 个空 chunk 即完成', async () => {
+  it('并发 chunk（不逐个 await）：按到达顺序串行落盘', async () => {
+    const { sink, receiver, controls } = setup()
+    receiver.onMeta(META)
+    // 同时发 3 个 chunk（fire-and-forget，模拟 DataChannel 到达）
+    await Promise.all([
+      receiver.onChunk(0, 0, 0, new Uint8Array(CHUNK_SIZE)),
+      receiver.onChunk(0, 0, 1, new Uint8Array(CHUNK_SIZE)),
+      receiver.onChunk(0, 0, 2, new Uint8Array(1)),
+    ])
+    expect(sink.openPart).toHaveBeenCalledTimes(1) // 只 open 一次（无竞态）
+    expect(sink.writeChunk.mock.calls.map((c) => c[1])).toEqual([0, CHUNK_SIZE, CHUNK_SIZE * 2])
+    expect(controls).toContainEqual({ type: 'file_done', fileId: 0 })
+  })
+
+  it('0 字节 part：1 个空 chunk 即完成，触发本地 onFileDone', async () => {
     const meta: MetaMessage = {
       type: 'meta',
       sessionId: 's',
@@ -98,10 +112,16 @@ describe('Receiver — chunk 落盘与 part 完成（SPEC §3.4）', () => {
         { id: 0, name: 'empty.txt', size: 0, parts: [{ index: 0, size: 0, sha256: 'EXPECTED' }] },
       ],
     }
-    const { sink, receiver, controls } = setup()
-    receiver.onMeta(meta)
-    await receiver.onChunk(0, 0, 0, new Uint8Array(0))
+    const { sink, controls } = setup()
+    const fileDone: number[] = []
+    const receiver2 = new Receiver(sink, (m) => controls.push(m), {
+      onProgress: () => {},
+      onFileDone: (f) => fileDone.push(f),
+    })
+    receiver2.onMeta(meta)
+    await receiver2.onChunk(0, 0, 0, new Uint8Array(0))
     expect(sink.finalizePart).toHaveBeenCalled()
     expect(controls).toContainEqual({ type: 'file_done', fileId: 0 })
+    expect(fileDone).toEqual([0]) // 本地 UI 立即知道完成
   })
 })

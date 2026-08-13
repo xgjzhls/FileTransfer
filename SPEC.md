@@ -25,7 +25,7 @@
 | 参数 | 值 | 说明 |
 |---|---|---|
 | part 大小 | 512 MiB（末 part 可小） | 存储/校验/「已完成」原子单位 |
-| chunk 大小 | 1 MiB（末 chunk 可小） | 传输单位；每 part ≤512 chunk |
+| chunk 大小 | 256 KiB（末 chunk 可小） | 传输单位；每 part ≤2048 chunk。payload 上限取浏览器 DataChannel maxMessageSize（Chrome/WebKit 262144）减去帧头（13B）后的 256KiB-64；CONTEXT 词汇表允许 256KB–1MB |
 | part 校验 | SHA-256 | part 收齐后读回整文件校验 |
 | DataChannel | ordered:true, reliable | [v2] unordered + 应用层重传 |
 | 背压阈值 | bufferedAmount > 8 MiB 暂停排程 | 发送端节流 |

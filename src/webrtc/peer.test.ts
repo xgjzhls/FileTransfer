@@ -158,4 +158,26 @@ describe('RtcPeer — DataChannel 数据与失败状态', () => {
     pc.triggerConnState('failed')
     expect(states.at(-1)).toBe('failed')
   })
+
+  it('waitChannel：dc 未 open 时挂起，open 事件后 resolve', async () => {
+    const { pc, peer } = setup()
+    pc.triggerChannel()
+    pc.channel!.readyState = 'connecting'
+    let resolved = false
+    const pending = peer.waitChannel(2000).then(() => {
+      resolved = true
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(resolved).toBe(false)
+    pc.channel!.readyState = 'open'
+    pc.channel!.onopen?.()
+    await pending
+    expect(resolved).toBe(true)
+  })
+
+  it('waitChannel：已 open 立即返回', async () => {
+    const { pc, peer } = setup()
+    pc.triggerChannel()
+    await peer.waitChannel(2000)
+  })
 })

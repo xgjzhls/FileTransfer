@@ -41,9 +41,11 @@ export class StorageAdapter {
     return this.rpc<number>({ type: 'open-part', sessionId, fileId, partIndex })
   }
 
-  /** 在 part 偏移处写入 chunk（bytes 需为完整 buffer，transferable 移交） */
-  async writeChunk(writerId: number, offset: number, bytes: Uint8Array<ArrayBuffer>): Promise<void> {
-    await this.rpc<null>({ type: 'write', writerId, offset, bytes: bytes.buffer })
+  /** 在 part 偏移处写入 chunk（payload 可能是 subarray 视图——拷贝出独立 buffer 再 transfer） */
+  async writeChunk(writerId: number, offset: number, bytes: Uint8Array): Promise<void> {
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    await this.rpc<null>({ type: 'write', writerId, offset, bytes: copy.buffer })
   }
 
   async closeWriter(writerId: number): Promise<void> {

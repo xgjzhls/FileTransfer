@@ -1,10 +1,24 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { readFileSync } from 'node:fs'
+
+// 手机局域网测试：VITE_HTTPS=1 启用 https + 监听 0.0.0.0（证书见 .local-certs/）
+const isHttps = process.env.VITE_HTTPS === '1'
+const httpsOptions = isHttps
+  ? {
+      key: readFileSync('.local-certs/server.key'),
+      cert: readFileSync('.local-certs/server.crt'),
+    }
+  : undefined
 
 // https://vite.dev/config/
 export default defineConfig({
   base: './', // GitHub Pages 子路径部署（/FileTransfer/）
+  server: {
+    host: true,
+    ...(httpsOptions ? { https: httpsOptions } : {}),
+  },
   plugins: [
     react(),
     VitePWA({

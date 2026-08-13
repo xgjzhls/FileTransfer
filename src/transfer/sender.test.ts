@@ -82,7 +82,7 @@ describe('Sender — 顺序发送（SPEC §3.5）', () => {
     expect(decoded[2].fileId).toBe(1)
   })
 
-  it('512MiB part 边界：恰好一个满 part（512 chunk），onPartDone 一次', async () => {
+  it('512MiB part 边界：恰好一个满 part（2049 chunk），onPartDone 一次', async () => {
     const { sender, events, transport } = setup()
     const bytes = new Uint8Array(PART)
     // 假 source 直接返回子区间，不需要真实内存全量？size 只用于计划
@@ -92,7 +92,7 @@ describe('Sender — 顺序发送（SPEC §3.5）', () => {
       slice: async (start, end) => bytes.subarray(start, end),
     }
     await sender.send([{ id: 0, size: PART, source }])
-    expect(transport.sent).toHaveLength(512)
+    expect(transport.sent).toHaveLength(2049)
     expect(events.onPartDone).toHaveBeenCalledTimes(1)
     expect(events.onFileDone).toHaveBeenCalledTimes(1)
   })

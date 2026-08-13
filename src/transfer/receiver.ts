@@ -26,6 +26,8 @@ export interface PartSink {
 export interface ReceiverEvents {
   /** 每收一个 chunk 上报（接收进度 UI） */
   onProgress(fileId: number, partIndex: number, received: number, total: number): void
+  /** 本端作为接收方完成整个文件（本地 UI 更新，不等对方确认） */
+  onFileDone(fileId: number): void
 }
 
 interface PartState {
@@ -48,11 +50,13 @@ export class Receiver {
   private readonly events: ReceiverEvents
   private files: Map<number, FileState> = new Map()
   private sessionId = ''
+  /** 每 part 一个串行写队列：DataChannel ordered:true 保证到达顺序，串行落盘避免并发 writer 交错 */
+  private readonly queues = new Map<string, Promise<void>>()
 
   constructor(sink: PartSink, sendControl: (msg: TransferControlMessage) => void, events?: ReceiverEvents) {
     this.sink = sink
     this.sendControl = sendControl
-    this.events = events ?? { onProgress: () => {} }
+    this.events = events ?? { onProgress: () => {}, onFileDone: () => {} }
   }
 
   onMeta(meta: MetaMessage): void {
@@ -74,7 +78,16 @@ export class Receiver {
     this.files = files
   }
 
-  async onChunk(fileId: number, partIndex: number, chunkIndex: number, payload: Uint8Array): Promise<void> {
+  onChunk(fileId: number, partIndex: number, chunkIndex: number, payload: Uint8Array): Promise<void> {
+    const key = `${fileId}:${partIndex}`
+    const prev = this.queues.get(key) ?? Promise.resolve()
+    const next = prev.then(() => this.processChunk(fileId, partIndex, chunkIndex, payload))
+    // 队列吞错但保留给调用方：一个 chunk 失败不阻断后续（如 part_reset 重传）
+    this.queues.set(key, next.catch(() => {}))
+    return next
+  }
+
+  private async processChunk(fileId: number, partIndex: number, chunkIndex: number, payload: Uint8Array): Promise<void> {
     const file = this.files.get(fileId)
     const part = file?.parts.get(partIndex)
     if (!file || !part || part.done) return
@@ -102,6 +115,7 @@ export class Receiver {
       file.doneCount += 1
       if (file.doneCount === file.parts.size) {
         this.sendControl({ type: 'file_done', fileId })
+        this.events.onFileDone(fileId)
       }
     } else {
       // 整个 part 重传（T05）：清空已收 chunk，发送端将重发全部

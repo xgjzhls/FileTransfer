@@ -38,6 +38,9 @@ class FakeRtc implements RtcPeerLike {
   sendData(data: string | Uint8Array): void {
     this.sent.push(data)
   }
+  async waitChannel(_timeoutMs?: number): Promise<void> {
+    /* fake 视为已 open */
+  }
   close(): void {
     this.closed = true
   }

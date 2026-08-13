@@ -25,6 +25,8 @@ export interface RtcPeerLike {
   close(): void
   readonly state: PeerState
   readonly bufferedAmount: number
+  /** 等待 DataChannel open（发送前调用，避免首帧被丢） */
+  waitChannel(timeoutMs?: number): Promise<void>
 }
 
 const GATHER_TIMEOUT_MS = 20_000
@@ -38,6 +40,8 @@ export class RtcPeer implements RtcPeerLike {
   private readonly pc: RTCPeerConnection
   private dc: RTCDataChannel | null = null
   private _state: PeerState = 'idle'
+  private channelOpenPromise: Promise<void> | null = null
+  private resolveChannelOpen: (() => void) | null = null
 
   constructor(events: RtcPeerEvents, pcFactory: () => RTCPeerConnection = defaultPcFactory) {
     this.events = events
@@ -53,6 +57,22 @@ export class RtcPeer implements RtcPeerLike {
   /** DataChannel 待发送字节数（Sender 背压用，SPEC §3.1） */
   get bufferedAmount(): number {
     return this.dc?.bufferedAmount ?? 0
+  }
+
+  /** 等待 DataChannel open；发送前 await，避免 meta/chunk 首帧丢失 */
+  async waitChannel(timeoutMs: number = 10_000): Promise<void> {
+    if (this.dc?.readyState === 'open') return
+    if (!this.channelOpenPromise) {
+      this.channelOpenPromise = new Promise((resolve) => {
+        this.resolveChannelOpen = resolve
+      })
+    }
+    await Promise.race([
+      this.channelOpenPromise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('data channel open timeout')), timeoutMs),
+      ),
+    ])
   }
 
   async createOffer(): Promise<string> {
@@ -107,7 +127,10 @@ export class RtcPeer implements RtcPeerLike {
 
   private attachChannel(dc: RTCDataChannel): void {
     this.dc = dc
+    // 二进制统一收 ArrayBuffer（默认 binaryType 'blob' 会让 new Uint8Array(e.data) 失败）
+    dc.binaryType = 'arraybuffer'
     dc.onmessage = (e) => this.events.onDataMessage(e.data as string | ArrayBuffer)
+    dc.onopen = () => this.resolveChannelOpen?.()
   }
 
   private handleConnState(conn: RTCPeerConnectionState): void {
@@ -140,13 +163,20 @@ export class RtcPeer implements RtcPeerLike {
 async function waitForGatheringComplete(pc: RTCPeerConnection): Promise<void> {
   if (pc.iceGatheringState === 'complete') return
   await new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
     const done = () => {
+      // icegatheringstatechange 在 new→gathering 时也会触发——必须等 complete
+      // 否则 sdp 里还没有 candidate 就发出去
+      if (pc.iceGatheringState !== 'complete') return
       pc.onicegatheringstatechange = null
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       resolve()
     }
     pc.onicegatheringstatechange = done
     // 兜底：STUN 挂起时不能无限等（本地 host candidate 通常即时）
-    const timer = setTimeout(done, GATHER_TIMEOUT_MS)
+    timer = setTimeout(() => {
+      pc.onicegatheringstatechange = null
+      resolve() // 即使未 complete 也返回（sdp 可能缺候选，但避免挂死）
+    }, GATHER_TIMEOUT_MS)
   })
 }
