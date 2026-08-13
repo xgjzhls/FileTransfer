@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { runOpfsQuotaTest, type OpfsQuotaResult } from './spike/opfs'
+import { runOpfsQuotaTest, clearOpfsTestData, type OpfsQuotaResult } from './spike/opfs'
 import { runStreamDownloadTest, type StreamDownloadResult } from './spike/streamDownload'
 
 type SwState = 'unsupported' | 'registering' | 'controlled' | 'uncontrolled'
@@ -75,19 +75,6 @@ function App() {
     controlled: '已控制 ✓',
     uncontrolled: '未控制（点重载）',
   }[swState]
-
-  async function handleCleanup() {
-    setCleaning(true)
-    setCleanResult('清理中…')
-    try {
-      const r = await clearOpfsTestData()
-      setCleanResult(`已移除 ${r.removed.length} 项：${r.removed.join(', ') || '（无）'}；释放 ${fmtBytes(r.freedBytes)}`)
-    } catch (e) {
-      setCleanResult(`清理失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setCleaning(false)
-    }
-  }
 
   async function handleCleanup() {
     setCleaning(true)
