@@ -1,10 +1,10 @@
 # T05: chunk 传输 + part 校验 + 导出
 
-- 状态：✅ 代码完成（src/transfer/：framing + sender + receiver + controller + export；115 单测全绿）；⚠️ 验收 6（双浏览器 1GB+ SHA-256 一致 + iPhone 真机）待用户
+- 状态：✅ 代码完成（含性能优化：背压事件化 + 零拷贝写盘，300MiB 实测 30 MiB/s）；⚠️ 验收 6（1GB+ SHA-256 一致 + iPhone 真机）待用户设备
 - 阻塞：T02, T04
 - 被阻塞者：T06, T08
 - 引用：SPEC §3.1/§3.2/§4；ADR-0005
-- 完成备注：`npm test` 115/115；meta 携带真实 part SHA-256（修复了空哈希死循环）；part_reset 整 part 重传为 T05 临时机制（T06 换 bitfield）
+- 完成备注：`npm test` 118/118；e2e 6/6（E2E_NO_PROXY=1）；chunk 256KiB 为 DataChannel maxMessageSize 硬上限（SPEC 已注）；导出支持分享 + 下载到本机
 
 ## 目标
 真正的数据传输：文件切 part/chunk 发送，接收端落盘、校验、拼接、导出（文件/照片门控）。

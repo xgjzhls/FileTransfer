@@ -1,6 +1,6 @@
 # HANDOFF — LocalTransfer（换机交接）
 
-> 交接时间：2026-08-13。用途：**在新电脑上继续开发**。
+> 交接时间：2026-08-13（第二次，换机到新电脑继续开发）。
 > 阅读顺序：本文件 → `CONTEXT.md` → `SPEC.md` → `decisions/adr/` → `.scratch/transfer/issues/`（按依赖顺序）。
 
 ## 项目一句话
@@ -8,61 +8,90 @@
 
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
-- 分支：`main`（规范主线：文档 + SPEC + 8 张票 + T01 应用骨架）；`prototype/storage-spike`（spike 原型档案，只读参考，勿动）
-- 当前：main @ `6fc2ab6`，工作区干净
+- 分支：`main`（当前 @ `8685aa0`，工作区干净）；`prototype/storage-spike`（只读参考，勿动）
+- **T01-T05 代码全部完成**，T05 验收 6（1GB+ SHA-256 真机）待用户设备；**下一步 T06 续传**
 
-## 已有产物（先读，勿重复造）
+## 已有产物
 | 路径 | 内容 |
 |---|---|
-| `CONTEXT.md` | 约束、词汇、已拍板决策、spike 结论、部署现状 |
-| `SPEC.md` | 正式规格：传输协议、存储层、信令、UI、PWA、里程碑 |
-| `decisions/adr/0001-0005` | 架构决策（零原生应用 / QR 信令 / HTTPS 引导 / 双通道信令 / bitfield 续传 + ordered） |
-| `.scratch/transfer/issues/T01-T08` | 8 张实现票（含阻塞边与验收标准），T01 已完成 |
-| `src/` `public/` `docs/` | T01 应用骨架（React + TS7 + Vite + PWA）；`docs/` 是构建产物（Pages 部署源） |
+| `CONTEXT.md` / `SPEC.md` | 约束词汇 / 正式规格（v1 定稿） |
+| `decisions/adr/0001-0005` | 架构决策 |
+| `.scratch/transfer/issues/T01-T08` | 实现票；T01-T05 状态已更新 |
+| `src/` | 前端：`pages/`(Home/Settings/Spike) + `protocol/`(信令+传输消息类型) + `signaling/`(WS 客户端) + `webrtc/`(RtcPeer/ConnectionManager/sdpCodec/diagnostics) + `transfer/`(Sender/Receiver/Controller/framing/export) + `storage/`(OPFS 引擎+Worker+adapter+SessionStore+cleanup) |
+| `server/` | CF Worker 信令：index(路由)+roomDo(DO)+roomCore(纯逻辑)+roomCode；`smoke.mjs` |
+| `scripts/` | `e2e.mjs`（Playwright 点击测试）、`bench.mjs`（传输测速） |
+| `.local-certs/` | 自签测试证书（**已入库**，新设备直接用；server.key 为测试私钥） |
+| `.env.development` | dev 模式信令地址（指向本地 wrangler dev，未入库） |
+| `docs/` | Pages 构建产物（main 分支 /docs，用户已设 Pages 源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01-T05 代码 ✅；最新 `cabf863`）
-- **下一步：T06 续传**（bitfield + resume_manifest + 自动重连）—— 或先做 T05 验收 6 双浏览器联调
-- 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08（详见各票）
-- T02 遗留：真机 1GB 写入拼接复测；T05 遗留：双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机 —— 均为用户步骤
-- `npm test` 115/115 绿
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅）
+- **下一步：T06 续传**（bitfield + resume_manifest + 自动重连）
+- 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08
+- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）—— 桌面 e2e 已全绿，真机未验
+- `npm test` 118/118 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）6/6 绿
 
-## 新电脑环境搭建（关键，按序执行）
-1. Node ≥ 22（项目在 v24.12.0 上构建验证）；克隆仓库后 `npm install`
-2. **GitHub SSH 走代理**：用户网络直连 GitHub 不通（DNS 被 fake-ip 劫持），Clash 混合端口 `127.0.0.1:7890`。`~/.ssh/config` 需配：
-   ```
-   Host github.com
-     HostName github.com
-     IdentityFile ~/.ssh/github   # 新电脑需自己的 key，旧机 key 不可沿用
-     ProxyCommand nc -X connect -x 127.0.0.1:7890 %h %p
-   ```
-3. Git 身份：若未配置 user.name/email，提交会 fallback 为 `LocalTransfer Dev`
-4. pi 技能流：如需同款（ask-matt / handoff / implement / tdd 等），把旧机 `~/.pi/agent/skills` 与 `~/.pi/agent/settings.json`（含已装扩展 web-search / btw / subagents / ask-user-question / todo）拷贝过来，或重装 pi + 扩展
-5. **TS7 陷阱**：Go 原生编译器的 DOM 类型缺 OPFS sync access handle，`src/spike/fs-sync-access.d.ts` 已补齐——勿删
+## 本地测试环境（全本地，绕开 Cloudflare 网络问题）——关键
+用户网络：DNS 被 Clash fake-ip 劫持（198.18.x.x），不开系统代理/TUN 无法直连 Cloudflare；**开发测试一律走本地信令**：
+
+```bash
+# 1. 本地信令（HTTPS，手机可访问；证书已在仓库 .local-certs/）
+cd server
+npx wrangler dev --port 8787 --ip 0.0.0.0 --local-protocol https \
+  --https-key-path ../.local-certs/server.key --https-cert-path ../.local-certs/server.crt
+
+# 2. 前端（HTTPS + 局域网监听）
+cd ..
+VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 Wi-Fi 访问）
+```
+
+- `.env.development`：`VITE_SIGNALING_WSS=wss://192.168.10.26:8787/ws`（换机后若 IP 变化改这里）
+- **手机访问前需信任 ca.crt**（`ca.crt` 在仓库 .local-certs/，发给手机安装 + 完全信任；一次性）
+- 电脑浏览器访问 https://192.168.10.26:8787 点「高级→继续前往」豁免一次，或 sudo 装 CA 到系统钥匙串
+- 证书 SAN：192.168.10.26 + 127.0.0.1 + localhost（换机后 IP 变则重新生成：openssl 命令见 `.local-certs/` 生成记录，或重新执行生成流程）
+
+## 测试与验证
+- 单测：`npm test`（Vitest，118 个，含 storage/webrtc/transfer/signaling/server）
+- **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→无 JS 错；WebRTC 环境自动探测降级）
+  - e2e 默认走代理 `http://127.0.0.1:7890`（Clash），**Clash 退出后必须 E2E_NO_PROXY=1**
+  - headless chromium 需 WebRTC 参数（脚本内置）：`--disable-features=WebRtcHideLocalIpsWithMdns --force-webrtc-ip-handling-policy=default_public_and_private_interfaces --allow-loopback-ice`
+- **测速**：`E2E_NO_PROXY=1 node scripts/bench.mjs https://localhost:5173 300`（300MiB，实测 ~30 MiB/s）
+- 线上信令冒烟：`HTTPS_PROXY=http://127.0.0.1:7890 node server/smoke.mjs https://localtransfer-signaling.dirichray.workers.dev`（8/8）
+
+## 已知边界与坑（调试必读）
+- **DataChannel maxMessageSize = 262144**（Chrome/WebKit 硬上限）→ `CHUNK_SIZE = 256*1024-64`（帧头余量），**1MiB chunk 会抛错**；背压用 `bufferedamountlow` 事件（Sender.pump）
+- **iOS OPFS 无 createWritable**，只用 createSyncAccessHandle（Worker 内）；`estimate()` 恒 0
+- **Clash TUN/fake-ip**：utun 接口会让 WebRTC 候选变成 198.18.0.1（fake-ip），手机连不上电脑 → **彻底退出 Clash**（非仅关 TUN 模式）后候选回真实 IP；诊断：页面「诊断」区块收集本机候选 IP
+- **mDNS 候选**（xxx.local）：依赖路由器组播解析，跨设备可能失败 → 电脑 Chrome 带 `--disable-features=WebRtcHideLocalIpsWithMdns` 启动可绕开
+- 照片门控 <300MiB（`PHOTO_GATE_BYTES`）；导出有「下载到本机」（Blob，>2GB 慎用）与「导出（分享）」
+- 孤儿数据：启动扫描 + 设置页清理（T02 已实现）
+
+## 关键 bug 修复记录（e2e 驱动的坑，勿重蹈）
+1. `waitForGatheringComplete` 曾无条件 resolve（new→gathering 事件）→ sdp 无候选连接卡 signaling；必须等 `iceGatheringState === 'complete'`
+2. `RTCDataChannel.binaryType` 默认 'blob' → 必须设 'arraybuffer'，否则收到 Blob 解析失败
+3. `adapter.writeChunk` 传 subarray 的整个 buffer（含帧头）→ 哈希不匹配；改为传 byteOffset/byteLength 零拷贝
+4. Receiver 多 chunk 并发写盘竞态（openPart 双 writer）→ 每 part 串行队列
+5. 接收端完成文件后本地 UI 不更新（file_done 只发对端）→ Receiver 本地 onFileDone 事件
+6. 信令 API 缺 CORS 头 → 浏览器跨域拦截「创建房间报错」；已修（server cors() + OPTIONS）
+7. meta 的 part sha256 空占位 → 接收端校验必败无限 part_reset；发送端 startSend 先算真实哈希
+
+## 新电脑环境搭建（按序）
+1. Node ≥ 22；`git clone` + `npm install`
+2. GitHub SSH：`~/.ssh/config` 配 `Host github.com` + 新 key + `ProxyCommand nc -X connect -x 127.0.0.1:7890 %h %p`（用户网络 fake-ip 劫持，直连不通）
+3. 测试依赖：`npx playwright install chromium`（e2e 用；可选 webkit 跨浏览器验证）
+4. 本地测试环境按上文「本地测试环境」章节启动（证书已入库，无需重新生成；IP 变了才重新生成）
+5. pi 技能流：如需要，从旧机拷 `~/.pi/agent/skills` 与 `~/.pi/agent/settings.json`
+6. **TS7 陷阱**：DOM 类型缺 OPFS sync access handle，`src/spike/fs-sync-access.d.ts` 已补齐——勿删；`erasableSyntaxOnly` 禁参数属性/枚举，`verbatimModuleSyntax` 需 `import type`
 
 ## 部署与验证
-- GitHub Pages legacy + `/docs`（main 分支），用户已把 Pages 源切到 main
-- 换机后先验证：`https://xgjzhls.github.io/FileTransfer/` 应是新应用（首页 / 设置 / Spike 测试 三页 + 顶导航），断网重开可用（SW 预缓存）
-- 更新代码流程：`npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && rm -f docs/sw.ts && touch docs/.nojekyll` → commit + push
-- 曾试 Actions workflow + deploy-pages，因 `github-pages` 环境 branch_policy 拦截失败，已弃用；正式版可回归（需先把环境策略改 All branches）
-
-## 已知边界（spike 实测，细节在 CONTEXT.md「关键风险」）
-- iOS OPFS：**无 createWritable**，只有 `createSyncAccessHandle`（须 Worker 内）；配额宽松（40GB+ 未触发）
-- iOS 存储按浏览器 / 独立 PWA 分区隔离；`estimate()` 恒返回 0
-- Web Share 大视频（~600MB）页面崩溃 → 照片门控阈值 <300MB（`PHOTO_GATE_BYTES` 配置常量），大文件走 Files 导入
-- 孤儿数据：中断会残留 OPFS 且不可见 → 应用需启动扫描 + 设置页清理（T02 范围）
-
-## 实现流程约定（ask-matt 主流程）
-- 每张票一个 `/implement` 会话（票间 `/clear`），内部 `/tdd`（红-绿-重构），提交前 `/code-review`（双轴：标准 + 规格）
-- 票内「验收标准」即 done 条件；真机验证步骤需要用户设备（iPhone/iPad，iOS 17+）
+- Pages legacy + `/docs`（main 分支）；更新流程：`npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && rm -f docs/sw.ts && touch docs/.nojekyll` → commit + push
+- **注意**：构建 Pages 用 `.env`（线上信令 wss://localtransfer-signaling.dirichray.workers.dev/ws）；dev 用 `.env.development`（本地）——vite 按模式区分，互不干扰
+- 换机后验证：`https://xgjzhls.github.io/FileTransfer/` 三页正常 + SW 离线可用
 
 ## 敏感信息
-- 本仓库无密钥、无凭据。T03 部署 Cloudflare 时需用户交互式登录（`wrangler login` 或 API Token），**切勿写入仓库**
-- 代理、SSH key 等属本机配置，不入库
+- **`.local-certs/server.key` 为自签测试私钥，已随仓库分发**（用户要求；仅局域网测试用，勿用于生产；生产另有 HTTPS 方案）
+- 无其他密钥/凭据。T03 部署 Cloudflare 需 `wrangler login`（用户交互，勿写入仓库）
+- 代理、SSH key、.env 等本机配置不入库
 
 ## suggested skills
-- `tdd` —— T02 起每张票（测试先行；单测用 Vitest）
-- `code-review` —— 每张票提交前双轴评审
-- `diagnosing-bugs` —— 传输/存储层若遇难缠 bug（尤其 iOS Safari 行为差异）
-- `wizard` —— T03 的 Cloudflare 账号 / Worker / Durable Objects 配置属人类步骤
-- `writing-for-agents` —— 若需更新 skills 或 AGENTS.md
+- `tdd`（每张票测试先行）、`code-review`（提交前双轴）、`diagnosing-bugs`（iOS Safari 行为差异）、`wizard`（T03 类人类步骤）、`writing-for-agents`（改 AGENTS.md 时）

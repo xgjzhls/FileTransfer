@@ -28,4 +28,6 @@ dist-ssr
 *.sln
 *.sw?
 server/.wrangler/
-.local-certs/
+
+# 本地测试证书（自签，仅局域网测试；server.key 为测试私钥，勿用于生产）
+# 2026-08-13 起随仓库分发：新设备直接用，手机已装 ca.crt 无需重装
