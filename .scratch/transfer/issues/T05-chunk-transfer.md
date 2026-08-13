@@ -1,9 +1,10 @@
 # T05: chunk 传输 + part 校验 + 导出
 
-- 状态：待实现
+- 状态：✅ 代码完成（src/transfer/：framing + sender + receiver + controller + export；115 单测全绿）；⚠️ 验收 6（双浏览器 1GB+ SHA-256 一致 + iPhone 真机）待用户
 - 阻塞：T02, T04
 - 被阻塞者：T06, T08
 - 引用：SPEC §3.1/§3.2/§4；ADR-0005
+- 完成备注：`npm test` 115/115；meta 携带真实 part SHA-256（修复了空哈希死循环）；part_reset 整 part 重传为 T05 临时机制（T06 换 bitfield）
 
 ## 目标
 真正的数据传输：文件切 part/chunk 发送，接收端落盘、校验、拼接、导出（文件/照片门控）。

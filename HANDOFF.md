@@ -21,10 +21,11 @@
 | `src/` `public/` `docs/` | T01 应用骨架（React + TS7 + Vite + PWA）；`docs/` 是构建产物（Pages 部署源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅，T02 ✅ `704ffde`，T03 ✅ `4a00fe6` + 线上部署）
-- **下一步：T04 WebRTC 连接（tracer bullet）**—— 信令已部署可用（`wss://localtransfer-signaling.dirichray.workers.dev/ws`，.env 已填）
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01-T05 代码 ✅；最新 `cabf863`）
+- **下一步：T06 续传**（bitfield + resume_manifest + 自动重连）—— 或先做 T05 验收 6 双浏览器联调
 - 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08（详见各票）
-- T02 遗留：验收标准 6 真机复测（iPhone 写入 1GB+ 并拼接）待用户设备执行；`npm test` 37/37 绿
+- T02 遗留：真机 1GB 写入拼接复测；T05 遗留：双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机 —— 均为用户步骤
+- `npm test` 115/115 绿
 
 ## 新电脑环境搭建（关键，按序执行）
 1. Node ≥ 22（项目在 v24.12.0 上构建验证）；克隆仓库后 `npm install`
