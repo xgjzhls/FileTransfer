@@ -31,22 +31,18 @@
 - [ADR-0002](decisions/adr/0002-qr-signaling-no-broker.md)：纯二维码信令，无中间服务器
 - [ADR-0003](decisions/adr/0003-https-bootstrap-pwa.md)：HTTPS 引导 + PWA 离线安装
 - [ADR-0004](decisions/adr/0004-signaling-dual-channel.md)：信令双通道 —— 在线发现 + 离线二维码兜底
+- [ADR-0005](decisions/adr/0005-resume-and-datachannel.md)：传输协议 —— bitfield 粒度续传 + ordered DataChannel
 
-## 传输协议设计（草案）
-- **建连**：A 端生成 offer → gzip 压缩 → 二维码 → B 端扫码 → 生成 answer → 二维码 → A 扫码 → DataChannel 建立
-- **元数据先行**：连接建立后先发文件清单（名/大小/校验和），接收端确认后才开始传输
-- **两级分块**：文件切 ~512MB「部分」（part，存储与续传粒度）+ 传输层小 chunk（256KB–1MB，背压与重传粒度）
-- **校验**：逐部分 SHA-256；缺失 chunk 重传
-- **背压**：`bufferedAmount` 控制发送速率
-- **自动续传**：中断后在线自动重连（或离线重新扫码配对），两端交换会话清单（manifest），接收端已收完整部分直接跳过，只补缺失部分
-- **拼接**：接收端部分落盘 → 全部完成后自动拼接为单个文件 → 导出到「文件」App
+## 规格说明
+- **[SPEC.md](SPEC.md)** 为传输协议、存储层、信令、UI、PWA 的正式规格（v1 定稿）。协议细节（消息 schema、状态机、续传握手、参数表）以 SPEC 为准，本文件不再重复维护草案。
 
 ## 已拍板（本会话）
 - 发现机制：方案 A（在线发现 + 离线二维码兜底）→ ADR-0004
-- 续传：自动续传（在线自动重连；离线重新扫码后从最后完整部分继续，不重传已收数据）
-- 接收去向：「文件」App + 「照片」库（图片/视频经 Web Share 存照片，其余存文件）
+- 续传：自动续传（在线自动重连；离线重新扫码后从最后完整部分继续，不重传已收数据）→ 粒度定为 chunk bitfield（ADR-0005）
+- 接收去向：「文件」App + 「照片」库（图片/小视频 <~300MB 经 Web Share 存照片；大视频/大文件存「文件」App，由用户经 Files 分享面板导入照片）
 - 安全：物理在场 / 房间码在场即足够，不设 PIN
 - 引导：接受「每台设备联网打开一次」（方案 A 隐含）
+- DataChannel：ordered:true + reliable（v1；[v2] unordered）→ ADR-0005
 
 ## 开放问题（待拍板 / 待验证）
 1. **接收端 10GB 存储与去向 —— 待 spike（最高优先级，需真实 iPhone/iPad）**：
