@@ -298,7 +298,7 @@ export default function Home() {
     }
   }
 
-  async function exportFile(item: RecvItem) {
+  async function exportFile(item: RecvItem, mode: 'share' | 'download') {
     const fileMeta = recvMetaRef.current.find((f) => f.id === item.id)
     if (!fileMeta || !sessionId) return
     setExportMsg('拼接中…')
@@ -306,6 +306,20 @@ export default function Home() {
       const adapter = getStorageAdapter()
       await adapter.merge(sessionId, item.id, item.name, fileMeta.parts.length)
       const bytes = await adapter.readMerged(sessionId, item.id, item.name)
+      if (mode === 'download') {
+        // 桌面：保存到文件系统（下载目录或选择位置）
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: guessMime(item.name) })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = item.name
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        URL.revokeObjectURL(url)
+        setExportMsg(`已下载 ${item.name}（浏览器下载目录）`)
+        return
+      }
       const file = new File([bytes.buffer as ArrayBuffer], item.name, { type: guessMime(item.name) })
       const target = classifyExport(item.name, item.size)
       await navigator.share({
@@ -474,7 +488,10 @@ export default function Home() {
                           {it.name} <span className="muted">({formatBytes(it.size)})</span>
                         </span>
                         {it.status === 'done' ? (
-                          <button onClick={() => void exportFile(it)}>导出</button>
+                          <div className="row">
+                            <button onClick={() => void exportFile(it, 'share')}>导出（分享）</button>
+                            <button onClick={() => void exportFile(it, 'download')}>下载到本机</button>
+                          </div>
                         ) : (
                           <span className="mono">
                             {it.receivedChunks}/{it.totalChunks} chunk
