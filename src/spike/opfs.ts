@@ -1,10 +1,11 @@
 /**
  * Test 1 — iOS Safari OPFS quota probe.
  *
- * Writes a growing file via OPFS until the browser refuses, reporting the
- * largest size it accepted, before/after navigator.storage.persist(), and the
- * storage estimate. This answers: "can a 10 GB file be stored on this device
- * inside the origin sandbox?"
+ * Writes a growing file via OPFS (sync access handles in a worker — the only
+ * write API WebKit implements on iOS) until the browser refuses, reporting the
+ * largest size it accepted, persist() before/after, and the storage estimate.
+ * This answers: "can a 10 GB file be stored on this device inside the origin
+ * sandbox?"
  */
 
 export interface OpfsQuotaResult {
@@ -21,7 +22,7 @@ export interface OpfsQuotaResult {
 }
 
 const CHUNK = 64 * 1024 * 1024 // 64 MB per write
-const CAP = 128 * 1024 * 1024 * 1024 // safety cap: 128 GB
+const CAP = 64 * 1024 * 1024 * 1024 // safety cap: 64 GB
 
 export async function runOpfsQuotaTest(
   onProgress: (writtenBytes: number) => void,
@@ -53,30 +54,22 @@ export async function runOpfsQuotaTest(
   const persistedAfter = await navigator.storage.persisted()
   const estimateAfter = await navigator.storage.estimate()
 
-  let total = 0
-  let error: string | null = null
-  let hitCap = false
-  const root = await navigator.storage.getDirectory()
-  const handle = await root.getFileHandle('quota-test.bin', { create: true })
-
-  try {
-    const writable = await handle.createWritable()
-    try {
-      while (true) {
-        // Fresh buffer per write: never reuse a buffer handed to the writer.
-        await writable.write(new Uint8Array(CHUNK))
-        total += CHUNK
-        onProgress(total)
-        if (total >= CAP) { hitCap = true; break }
+  const worker = new Worker(new URL('./opfsWorker.ts', import.meta.url), { type: 'module' })
+  const result = await new Promise<{ total: number; error: string | null; hitCap: boolean }>(
+    (resolve, reject) => {
+      worker.onmessage = (e) => {
+        const msg = e.data
+        if (msg.type === 'progress') {
+          onProgress(msg.bytes)
+        } else if (msg.type === 'done') {
+          resolve({ total: msg.total, error: msg.error, hitCap: msg.hitCap })
+        }
       }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e)
-    } finally {
-      try { await writable.abort() } catch { /* ignore */ }
-    }
-  } finally {
-    try { await root.removeEntry('quota-test.bin') } catch { /* ignore */ }
-  }
+      worker.onerror = (e) => reject(new Error(e.message || 'worker error'))
+      worker.postMessage({ type: 'start', chunkSize: CHUNK, cap: CAP })
+    },
+  )
+  worker.terminate()
 
   const durationMs = Date.now() - start
   return {
@@ -85,10 +78,10 @@ export async function runOpfsQuotaTest(
     persistedAfter,
     estimateBefore: estimateBefore ? { usage: estimateBefore.usage ?? 0, quota: estimateBefore.quota ?? 0 } : null,
     estimateAfter: estimateAfter ? { usage: estimateAfter.usage ?? 0, quota: estimateAfter.quota ?? 0 } : null,
-    maxBytes: total,
+    maxBytes: result.total,
     durationMs,
-    mbPerSec: durationMs > 0 ? (total / durationMs) * (1000 / 1024 / 1024) : 0,
-    error,
-    hitCap,
+    mbPerSec: durationMs > 0 ? (result.total / durationMs) * (1000 / 1024 / 1024) : 0,
+    error: result.error,
+    hitCap: result.hitCap,
   }
 }
