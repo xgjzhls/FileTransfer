@@ -22,9 +22,16 @@
 | P2P | WebRTC DataChannel（simple-peer 封装或原生） | 浏览器内唯一真 P2P 通道 |
 | 信令 | 单协议双通道：在线走轻量 WebSocket 信令服务（房间发现 + SDP 中转），离线降级二维码交换压缩 SDP | 打开网页即发现设备；离线兜底（ADR-0002 / 0004） |
 | 引导 bootstrap | HTTPS 静态托管（GitHub Pages / Cloudflare Pages），每设备联网访问一次 + SW 全量缓存 | 摄像头权限要求安全上下文（HTTPS）；SW 缓存后永久离线且保持安全上下文 |
-| 接收端存储 | **未定** —— 待 spike：A) SW 流式下载直落「文件」App；B) OPFS + persist()（配额存疑） | 见「开放问题」 |
+| 接收端存储 | **OPFS + createSyncAccessHandle（Worker 内随机写）**（spike 验证：iOS 唯一可用写入 API；配额宽松 40GB+） | 见「关键风险」 |
 | 发送端读取 | `<input type=file multiple>` + `file.slice()` 流式读 | 不把整文件载入内存 |
 | 外部依赖 | 零 | 运行时全程无互联网 |
+
+## 部署现状（T01 起）
+- 托管：GitHub Pages（https://xgjzhls.github.io/FileTransfer/），**legacy 模式**（Deploy from a branch）
+- 源：**main 分支**的 `/docs` 目录（提交的是构建产物）——Pages 设置需指向 main
+- 流程：改代码 → `npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && rm -f docs/sw.ts && touch docs/.nojekyll` → 提交推送（Pages 自动重建）
+- SW：vite-plugin-pwa injectManifest（`public/sw.ts` → dist/sw.js，预缓存全部资源 + spike 流式逻辑）
+- 注意：早期试过 Actions workflow + deploy-pages，因 `github-pages` 环境的 branch_policy 拦截失败，已弃用；正式版可回归 Actions 模式（需先改环境策略）
 
 ## 架构决策记录
 - [ADR-0001](decisions/adr/0001-browser-webrtc-no-native-apps.md)：浏览器 + WebRTC，零原生应用
@@ -45,17 +52,18 @@
 - DataChannel：ordered:true + reliable（v1；[v2] unordered）→ ADR-0005
 
 ## 开放问题（待拍板 / 待验证）
-1. **接收端 10GB 存储与去向 —— 待 spike（最高优先级，需真实 iPhone/iPad）**：
-   - iOS Safari OPFS 实际配额（是否容得下 10GB、`navigator.storage.persist()` 是否提额）
-   - SW 流式 Response 直接下载进「文件」App 是否可行（绕过 OPFS 配额；风险：Safari 可能整体缓冲）
-   - Web Share 将 10GB 视频存入「照片」库是否可行
+1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。
+   - **存照片（spike 测试 3）**：Web Share 小文件正常；~600MB 视频调起分享时页面崩溃重载（渲染进程崩溃）→ **大视频不能可靠经 Web Share 进照片库**。设计决策：照片选项按大小阈值门控（<~300MB 走 Web Share 存照片）；大视频存「文件」App，提示用户经 Files 分享面板导入照片（原生分享可处理大文件）；Safari 与 Chrome 的边界差异待测
 2. 电脑无摄像头时的离线 QR fallback（手动粘贴 answer 文本）—— 仅影响离线路径，低优先级
 
 ## 关键风险
-- **iOS Safari 存储配额**（历史 ~1GB/origin）：10GB 能否容纳未验证 → 最高优先级 spike，需要真实 iPhone/iPad
+- ~~iOS Safari 存储配额~~ **已解除（见开放问题 #1）**；新注意点：配额随剩余空间波动，正式版传输前需容量预警
+- iOS OPFS **无 createWritable**，只有 createSyncAccessHandle（须在 Worker 中用）——正式版存储层直接按此实现（已随 spike 验证）
 - Safari 独立 PWA 模式（添加到主屏幕）下：下载行为、摄像头权限、分享行为与普通 tab 有差异
 - 路由器 AP 隔离 / 跨 VLAN → mDNS 直连失败（需文档化 fallback；无 STUN/TURN 可用）
 - 锁屏 / 后台杀连接 → Wake Lock（iOS 17+）+ 部分粒度续传缓解
+- **孤儿数据**：传输/测试中断（页面被杀）会遗留 OPFS 中的部分文件且不可见 → 正式版需：会话 manifest 跟踪已收部分；启动时扫描孤儿数据并提示清理；设置页提供「清除全部数据」
+- **iOS 存储分区**：iOS 上每个浏览器的网站数据独立存放（Safari / Chrome 等各一个分区），iOS 16.4+ 的独立 PWA 又是另一个分区——spike 实测：Chrome 分区里占 60GB，在 Safari 里清理看到 0。正式版需锁定数据写入与清理都在同一浏览器/模式；另外 iOS `navigator.storage.estimate()` 恒返回 0，不能依赖
 
 ## 词汇表
 - **房间码**：在线信令服务中的会话标识，设备凭码加入同一房间并互相可见
