@@ -78,7 +78,7 @@ export default function Settings() {
           />
           <button onClick={handleSave}>{saved ? '已保存 ✓' : '保存'}</button>
         </div>
-        <p className="muted">设备名会显示在配对列表中 [T04 接入信令]。</p>
+        <p className="muted">设备名会显示在配对列表中。</p>
       </section>
 
       <section className="card">
