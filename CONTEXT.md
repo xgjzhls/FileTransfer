@@ -26,6 +26,12 @@
 | 发送端读取 | `<input type=file multiple>` + `file.slice()` 流式读 | 不把整文件载入内存 |
 | 外部依赖 | 零 | 运行时全程无互联网 |
 
+## 部署现状（spike 阶段）
+- 托管：GitHub Pages（https://xgjzhls.github.io/FileTransfer/），**legacy 模式**（Deploy from a branch）
+- 源：`prototype/storage-spike` 分支的 `/docs` 目录（提交的是构建产物）
+- 流程：改代码 → `npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && touch docs/.nojekyll` → 提交推送（Pages 自动重建）
+- 注意：早期试过 Actions workflow + deploy-pages，因 `github-pages` 环境的 branch_policy 拦截失败，已弃用并删除该工作流；后期正式版可回归 Actions 模式
+
 ## 架构决策记录
 - [ADR-0001](decisions/adr/0001-browser-webrtc-no-native-apps.md)：浏览器 + WebRTC，零原生应用
 - [ADR-0002](decisions/adr/0002-qr-signaling-no-broker.md)：纯二维码信令，无中间服务器
