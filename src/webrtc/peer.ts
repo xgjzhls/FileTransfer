@@ -21,9 +21,10 @@ export interface RtcPeerLike {
   createOffer(): Promise<string>
   acceptOffer(encodedOffer: string): Promise<string>
   acceptAnswer(encodedAnswer: string): Promise<void>
-  sendData(data: string | ArrayBuffer): void
+  sendData(data: string | Uint8Array): void
   close(): void
   readonly state: PeerState
+  readonly bufferedAmount: number
 }
 
 const GATHER_TIMEOUT_MS = 20_000
@@ -47,6 +48,11 @@ export class RtcPeer implements RtcPeerLike {
 
   get state(): PeerState {
     return this._state
+  }
+
+  /** DataChannel 待发送字节数（Sender 背压用，SPEC §3.1） */
+  get bufferedAmount(): number {
+    return this.dc?.bufferedAmount ?? 0
   }
 
   async createOffer(): Promise<string> {
@@ -76,7 +82,7 @@ export class RtcPeer implements RtcPeerLike {
     await this.pc.setRemoteDescription({ type: 'answer', sdp })
   }
 
-  sendData(data: string | ArrayBuffer): void {
+  sendData(data: string | Uint8Array): void {
     if (!this.dc || this.dc.readyState !== 'open') throw new Error('data channel not open')
     if (typeof data === 'string') {
       this.dc.send(data)

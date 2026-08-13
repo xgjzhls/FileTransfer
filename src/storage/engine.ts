@@ -20,8 +20,10 @@ export function mergedPath(sessionId: string, fileId: number, name: string): str
   return `sessions/${sessionId}/${fileId}/${name}`
 }
 
-export async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', bytes)
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // TS7 的 BufferSource 要求 ArrayBufferView<ArrayBuffer>；生产路径（File.slice/
+  // worker 传输）恒为 ArrayBuffer 支撑，SharedArrayBuffer 不会出现，cast 安全零拷贝
+  const digest = await crypto.subtle.digest('SHA-256', bytes as unknown as Uint8Array<ArrayBuffer>)
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 

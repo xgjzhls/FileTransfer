@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { ConnectionManager } from './connection'
 import type { ConnectionEvents } from './connection'
 import type { RtcPeerEvents, RtcPeerLike } from './peer'
@@ -12,8 +12,9 @@ class FakeRtc implements RtcPeerLike {
   acceptAnswerCalls = 0
   offerSdp = ''
   answerSdp = ''
-  sent: Array<string | ArrayBuffer> = []
+  sent: Array<string | Uint8Array> = []
   closed = false
+  bufferedAmount = 0
   events: RtcPeerEvents
 
   constructor(events: RtcPeerEvents) {
@@ -34,7 +35,7 @@ class FakeRtc implements RtcPeerLike {
     this.acceptAnswerCalls++
     this.answerSdp = sdp
   }
-  sendData(data: string | ArrayBuffer): void {
+  sendData(data: string | Uint8Array): void {
     this.sent.push(data)
   }
   close(): void {
@@ -45,14 +46,18 @@ class FakeRtc implements RtcPeerLike {
   }
 }
 
+beforeEach(() => {
+  FakeRtc.last = null
+})
+
 function setup() {
   const signals: Array<[string, SignalPayload]> = []
   const states: string[] = []
-  const metas: MetaMessage[] = []
+  const data: Array<string | ArrayBuffer> = []
   const errors: string[] = []
   const events: ConnectionEvents = {
     onState: (s) => states.push(s),
-    onMeta: (m) => metas.push(m),
+    onData: (d) => data.push(d),
     onError: (r) => errors.push(r),
   }
   const manager = new ConnectionManager(
@@ -60,7 +65,7 @@ function setup() {
     events,
     (rtcEvents) => new FakeRtc(rtcEvents),
   )
-  return { manager, signals, states, metas, errors }
+  return { manager, signals, states, data, errors }
 }
 
 function latestRtc(): FakeRtc {
@@ -113,39 +118,41 @@ describe('ConnectionManager — 握手流（SPEC §3.3）', () => {
   })
 })
 
-describe('ConnectionManager — meta 收发（SPEC §3.2）', () => {
-  it('handleData 收到 meta JSON → onMeta', () => {
-    const { manager, metas } = setup()
-    const meta: MetaMessage = {
-      type: 'meta',
-      sessionId: 'sess-1',
-      files: [{ id: 0, name: 'a.txt', size: 10, parts: [{ index: 0, size: 10, sha256: '' }] }],
-    }
-    manager.handleData(JSON.stringify(meta))
-    expect(metas).toEqual([meta])
+describe('ConnectionManager — DataChannel 数据透传', () => {
+  it('handleData → onData 原样透传（JSON 字符串与二进制）', async () => {
+    const { manager, data } = setup()
+    await manager.connectTo('dev-b')
+    // 通过 FakeRtc 的事件注入数据
+    const rtc = latestRtc()
+    rtc.events.onDataMessage('{"type":"meta"}')
+    const binary = new Uint8Array([1, 2, 3]).buffer
+    rtc.events.onDataMessage(binary)
+    expect(data).toEqual(['{"type":"meta"}', binary])
   })
 
-  it('handleData 非 JSON / 非 meta / binary 均忽略', () => {
-    const { manager, metas } = setup()
-    manager.handleData('not json')
-    manager.handleData(JSON.stringify({ type: 'part_done' }))
-    manager.handleData(new Uint8Array([1, 2, 3]).buffer)
-    expect(metas).toEqual([])
+  it('sendData 经 peer 发送；bufferedAmount 透传', async () => {
+    const { manager } = setup()
+    await manager.connectTo('dev-b')
+    const frame = new Uint8Array([0, 1, 2])
+    manager.sendData(frame)
+    expect(latestRtc().sent).toEqual([frame])
+    latestRtc().bufferedAmount = 1024
+    expect(manager.bufferedAmount).toBe(1024)
+  })
+
+  it('close 后无 peer，sendData 静默不抛', () => {
+    const { manager } = setup()
+    manager.close()
+    expect(() => manager.sendData(new Uint8Array([0]))).not.toThrow()
   })
 })
 
-describe('ConnectionManager — sendMeta 需要活动连接', () => {
-  it('connectTo 后 sendMeta 经 peer 发送', async () => {
+describe('ConnectionManager — sendData 需要活动连接', () => {
+  it('connectTo 后 sendData 经 peer 发送', async () => {
     const { manager } = setup()
     await manager.connectTo('dev-b')
     const meta: MetaMessage = { type: 'meta', sessionId: 's', files: [] }
-    manager.sendMeta(meta)
+    manager.sendData(JSON.stringify(meta))
     expect(latestRtc().sent).toEqual([JSON.stringify(meta)])
-  })
-
-  it('close 后无 peer，sendMeta 静默', () => {
-    const { manager } = setup()
-    manager.close()
-    expect(() => manager.sendMeta({ type: 'meta', sessionId: 's', files: [] })).not.toThrow()
   })
 })

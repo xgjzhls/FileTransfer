@@ -22,3 +22,29 @@ export interface MetaMessage {
   sessionId: string
   files: FileMeta[]
 }
+
+/** part 收齐并通过校验后（SPEC §3.2） */
+export interface PartDoneMessage {
+  type: 'part_done'
+  fileId: number
+  partIndex: number
+  sha256: string
+}
+
+/** 文件全部 part 完成后（SPEC §3.2） */
+export interface FileDoneMessage {
+  type: 'file_done'
+  fileId: number
+}
+
+/**
+ * part 校验失败 → 整个 part 重传（T05 临时机制；T06 以 bitfield 替换）。
+ * 接收端重置该 part 状态，发送端重发全部 chunk。
+ */
+export interface PartResetMessage {
+  type: 'part_reset'
+  fileId: number
+  partIndex: number
+}
+
+export type TransferControlMessage = MetaMessage | PartDoneMessage | FileDoneMessage | PartResetMessage

@@ -2,13 +2,12 @@
  * ConnectionManager —— 握手编排（SPEC §3.3 状态机 / §3.4 握手）。
  *
  * 把 SignalingClient 事件与 RtcPeer 串起来：点选设备 → offer；
- * 收到 offer → 自动回 answer；answer → connected；DataChannel 上
- * 互发 meta（T04 只互通清单，数据流 T05）。
+ * 收到 offer → 自动回 answer；answer → connected。DataChannel 数据
+ * 原样透传（T05 由 TransferController 做 framing/解析）。
  *
  * rtcFactory 接收 RtcPeerEvents（构造注入，便于单测 / UI 解耦）。
  */
 
-import type { MetaMessage } from '../protocol/transfer'
 import type { SignalPayload } from '../protocol/signaling'
 import type { RtcPeerEvents, RtcPeerLike } from './peer'
 
@@ -18,7 +17,8 @@ export interface SignalLike {
 
 export interface ConnectionEvents {
   onState(state: string): void
-  onMeta(meta: MetaMessage): void
+  /** DataChannel 原始数据（T05：framing 后的 control/chunk） */
+  onData(data: string | ArrayBuffer): void
   onError(reason: string): void
 }
 
@@ -57,24 +57,15 @@ export class ConnectionManager {
     await this.peer?.acceptAnswer(payload.sdp)
   }
 
-  /** DataChannel 消息（T04 仅 JSON 控制消息；binary chunk 属 T05） */
-  handleData(data: string | ArrayBuffer): void {
-    if (typeof data !== 'string') return
-    let msg: unknown
-    try {
-      msg = JSON.parse(data)
-    } catch {
-      return
-    }
-    if (msg && typeof msg === 'object' && (msg as { type?: string }).type === 'meta') {
-      this.events.onMeta(msg as MetaMessage)
-    }
+  /** DataChannel 待发送字节数（Sender 背压） */
+  get bufferedAmount(): number {
+    return this.peer?.bufferedAmount ?? 0
   }
 
-  /** 发送端经 DataChannel 发 meta 清单 */
-  sendMeta(meta: MetaMessage): void {
+  /** 经 DataChannel 发送原始数据（帧由调用方构造：encodeControl/encodeChunk） */
+  sendData(data: string | Uint8Array): void {
     try {
-      this.peer?.sendData(JSON.stringify(meta))
+      this.peer?.sendData(data)
     } catch {
       this.events.onError('data channel not open')
     }
@@ -89,7 +80,7 @@ export class ConnectionManager {
     this.peer?.close()
     const rtc = this.rtcFactory({
       onState: (s) => this.events.onState(s),
-      onDataMessage: (d) => this.handleData(d),
+      onDataMessage: (d) => this.events.onData(d),
     })
     this.peer = rtc
     return rtc
