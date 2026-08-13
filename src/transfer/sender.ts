@@ -22,6 +22,8 @@ export interface FileSource {
 export interface ChunkTransport {
   send(frame: Uint8Array): void
   readonly bufferedAmount: number
+  /** 背压：bufferedAmount 降到阈值以下时通知（返回取消函数） */
+  onBufferedAmountLow(callback: () => void): () => void
 }
 
 export interface SenderEvents {
@@ -94,11 +96,21 @@ export class Sender {
   private async pump(frame: Uint8Array): Promise<void> {
     this.transport.send(frame)
     while (this.transport.bufferedAmount > BACKPRESSURE_LIMIT) {
-      await delay(10)
+      // bufferedamountlow 事件唤醒（无实现时回退轮询）
+      await waitForLow(this.transport)
     }
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function waitForLow(transport: ChunkTransport): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      cancel()
+      resolve()
+    }
+    const cancel = transport.onBufferedAmountLow(finish)
+  })
 }

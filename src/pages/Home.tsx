@@ -111,6 +111,7 @@ export default function Home() {
           get bufferedAmount() {
             return managerRef.current?.bufferedAmount ?? 0
           },
+          onBufferedAmountLow: (cb) => managerRef.current?.onBufferedAmountLow(cb) ?? (() => {}),
         },
         {
           onMeta: (files, sid) => {

@@ -8,8 +8,19 @@ const PART = 512 * 1024 * 1024
 class FakeTransport {
   sent: Uint8Array[] = []
   bufferedAmount = 0
+  lowCallback: (() => void) | null = null
   send(frame: Uint8Array) {
     this.sent.push(frame)
+  }
+  onBufferedAmountLow(cb: () => void) {
+    this.lowCallback = cb
+    return () => {
+      this.lowCallback = null
+    }
+  }
+  drain() {
+    this.bufferedAmount = 0
+    this.lowCallback?.()
   }
 }
 
@@ -116,11 +127,12 @@ describe('Sender — 背压（SPEC §3.1: bufferedAmount > 8MiB 暂停）', () =
       await vi.advanceTimersByTimeAsync(0)
       expect(transport.sent.length).toBeGreaterThanOrEqual(1)
       const sentWhileBlocked = transport.sent.length
-      // 背压仍高：推进时间不应产生新发送
+      // 背压仍高：推进时间不应产生新发送（等待 bufferedamountlow 事件）
       await vi.advanceTimersByTimeAsync(500)
       expect(transport.sent.length).toBe(sentWhileBlocked)
-      // drain：bufferedAmount 归零 → 恢复发送直到完成
+      // drain：bufferedAmount 归零 + 触发 low 事件 → 恢复发送直到完成
       transport.bufferedAmount = 0
+      transport.drain()
       await vi.advanceTimersByTimeAsync(1000)
       await promise
       expect(transport.sent.length).toBe(4)

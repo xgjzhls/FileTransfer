@@ -76,6 +76,11 @@ export class ConnectionManager {
     if (this.peer) await this.peer.waitChannel(timeoutMs)
   }
 
+  /** 背压唤醒（透传 RtcPeer） */
+  onBufferedAmountLow(callback: () => void): () => void {
+    return this.peer?.onBufferedAmountLow(callback) ?? (() => {})
+  }
+
   close(): void {
     this.peer?.close()
     this.peer = null

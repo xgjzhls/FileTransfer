@@ -16,8 +16,20 @@ class FakeSink implements PartSink {
 class FakeTransport {
   sent: Uint8Array[] = []
   bufferedAmount = 0
+  lowCallback: (() => void) | null = null
   send(frame: Uint8Array) {
     this.sent.push(frame)
+  }
+  onBufferedAmountLow(cb: () => void) {
+    this.lowCallback = cb
+    return () => {
+      this.lowCallback = null
+    }
+  }
+  /** 测试辅助：模拟缓冲排空触发事件 */
+  drain() {
+    this.bufferedAmount = 0
+    this.lowCallback?.()
   }
 }
 

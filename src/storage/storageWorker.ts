@@ -33,7 +33,7 @@ async function handle(msg: StorageRequest): Promise<void> {
         break
       }
       case 'write': {
-        engine.writeChunk(msg.writerId, msg.offset, new Uint8Array(msg.bytes))
+        engine.writeChunk(msg.writerId, msg.offset, new Uint8Array(msg.bytes, msg.byteOffset, msg.byteLength))
         ok(msg.reqId, null)
         break
       }

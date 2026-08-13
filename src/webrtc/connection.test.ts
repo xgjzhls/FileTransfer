@@ -15,6 +15,7 @@ class FakeRtc implements RtcPeerLike {
   sent: Array<string | Uint8Array> = []
   closed = false
   bufferedAmount = 0
+  lowCallback: (() => void) | null = null
   events: RtcPeerEvents
 
   constructor(events: RtcPeerEvents) {
@@ -40,6 +41,12 @@ class FakeRtc implements RtcPeerLike {
   }
   async waitChannel(_timeoutMs?: number): Promise<void> {
     /* fake 视为已 open */
+  }
+  onBufferedAmountLow(cb: () => void): () => void {
+    this.lowCallback = cb
+    return () => {
+      this.lowCallback = null
+    }
   }
   close(): void {
     this.closed = true

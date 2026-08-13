@@ -8,7 +8,7 @@ import type { SessionDirInfo } from './types'
 
 export type StorageRequest =
   | { type: 'open-part'; reqId: number; sessionId: string; fileId: number; partIndex: number }
-  | { type: 'write'; reqId: number; writerId: number; offset: number; bytes: ArrayBuffer }
+  | { type: 'write'; reqId: number; writerId: number; offset: number; bytes: ArrayBuffer; byteOffset: number; byteLength: number }
   | { type: 'close-writer'; reqId: number; writerId: number }
   | { type: 'read-part'; reqId: number; sessionId: string; fileId: number; partIndex: number }
   | {

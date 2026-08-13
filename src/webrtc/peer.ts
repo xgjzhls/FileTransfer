@@ -9,6 +9,7 @@
  */
 
 import { compressSdp, decompressSdp } from './sdpCodec'
+import { BACKPRESSURE_LIMIT } from '../transfer/sender'
 
 export type PeerState = 'idle' | 'signaling' | 'connecting' | 'connected' | 'disconnected' | 'failed'
 
@@ -27,6 +28,8 @@ export interface RtcPeerLike {
   readonly bufferedAmount: number
   /** 等待 DataChannel open（发送前调用，避免首帧被丢） */
   waitChannel(timeoutMs?: number): Promise<void>
+  /** 背压唤醒（bufferedAmount 降到阈值以下） */
+  onBufferedAmountLow(callback: () => void): () => void
 }
 
 const GATHER_TIMEOUT_MS = 20_000
@@ -73,6 +76,16 @@ export class RtcPeer implements RtcPeerLike {
         setTimeout(() => reject(new Error('data channel open timeout')), timeoutMs),
       ),
     ])
+  }
+
+  /** 背压通知：bufferedAmount 降到阈值一半以下时回调（返回取消函数） */
+  onBufferedAmountLow(callback: () => void): () => void {
+    if (!this.dc) return () => {}
+    this.dc.bufferedAmountLowThreshold = Math.max(1, BACKPRESSURE_LIMIT / 2)
+    this.dc.onbufferedamountlow = callback
+    return () => {
+      if (this.dc) this.dc.onbufferedamountlow = null
+    }
   }
 
   async createOffer(): Promise<string> {
