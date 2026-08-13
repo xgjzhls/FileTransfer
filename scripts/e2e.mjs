@@ -17,10 +17,12 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 const BASE = process.argv[2] ?? 'http://localhost:5173'
+const PROXY = process.env.E2E_PROXY ?? 'http://127.0.0.1:7890'
 const LAUNCH_ARGS = [
   '--disable-features=WebRtcHideLocalIpsWithMdns',
   '--force-webrtc-ip-handling-policy=default_public_and_private_interfaces',
   '--allow-loopback-ice',
+  ...(process.env.E2E_NO_PROXY ? [] : [`--proxy-server=${PROXY}`]),
 ]
 
 const steps = []
