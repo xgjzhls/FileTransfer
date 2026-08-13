@@ -29,7 +29,7 @@ export async function runStreamDownloadTest(opts: StreamDownloadOptions): Promis
     return { ok: false, error: 'Service Worker 未控制本页（请先点「重载页面」）', pumpDurationMs: 0, bytesFed: 0 }
   }
 
-  const url = `/spike-${crypto.randomUUID()}.bin`
+  const url = `spike-${crypto.randomUUID()}.bin`
   const channel = new MessageChannel()
   const port = channel.port1
   const swPort = channel.port2
