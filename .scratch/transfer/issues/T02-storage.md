@@ -1,9 +1,10 @@
 # T02: 存储层 —— OPFS 读写 + 清理
 
-- 状态：待实现
+- 状态：✅ 已完成（src/storage/：engine + opfsSyncFs + storageWorker + adapter + sessionStore + cleanup + 26 单测）
 - 阻塞：T01
 - 被阻塞者：T05
 - 引用：SPEC §4；ADR-0005；spike 验证结论（sync access handle 是 iOS 唯一写入 API；estimate() 恒为 0；每浏览器分区隔离）
+- 完成备注：`npm test` 26/26；`npm run build` + `/docs` 已刷新；唯一未验项 = 验收标准 6（iPhone 真机 1GB+ 写入拼接，人类步骤）
 
 ## 目标
 接收端文件存储能力：Worker 内 OPFS 随机读写（`createSyncAccessHandle` + `{at}`）、part 文件管理、拼接、孤儿数据清理。

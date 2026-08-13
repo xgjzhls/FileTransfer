@@ -1,8 +1,42 @@
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { findOrphans, formatBytes } from '../storage'
+import type { OrphanReport } from '../storage'
+
 export default function Home() {
+  const [orphans, setOrphans] = useState<OrphanReport | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    // 启动时扫描孤儿数据（SPEC §4：无 manifest 或超 30 天）
+    findOrphans()
+      .then((report) => {
+        if (!cancelled) setOrphans(report)
+      })
+      .catch(() => {
+        // OPFS 不可用（如非安全上下文）时静默跳过
+        if (!cancelled) setOrphans({ orphans: [], totalBytes: 0 })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const orphanCount = orphans?.orphans.length ?? 0
+
   return (
     <>
       <h1>LocalTransfer</h1>
       <p>局域网 P2P 文件传输 · 零安装 · 离线可用</p>
+
+      {orphanCount > 0 && (
+        <div className="banner">
+          <span>
+            发现 {orphanCount} 个孤儿会话（占用 {formatBytes(orphans!.totalBytes)}，可能来自中断的传输）
+          </span>
+          <Link to="/settings">去设置清理 →</Link>
+        </div>
+      )}
 
       <section className="card">
         <h2>房间</h2>
