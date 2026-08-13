@@ -55,14 +55,13 @@
 - 引导：接受「每台设备联网打开一次」（方案 A 隐含）
 
 ## 开放问题（待拍板 / 待验证）
-1. **接收端 10GB 存储与去向 —— 待 spike（最高优先级，需真实 iPhone/iPad）**：
-   - iOS Safari OPFS 实际配额（是否容得下 10GB、`navigator.storage.persist()` 是否提额）
-   - SW 流式 Response 直接下载进「文件」App 是否可行（绕过 OPFS 配额；风险：Safari 可能整体缓冲）
-   - Web Share 将 10GB 视频存入「照片」库是否可行
+1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。
+   - 待补：Web Share 将大视频存入「照片」库是否可行（测试 3，存照片是已定需求）
 2. 电脑无摄像头时的离线 QR fallback（手动粘贴 answer 文本）—— 仅影响离线路径，低优先级
 
 ## 关键风险
-- **iOS Safari 存储配额**（历史 ~1GB/origin）：10GB 能否容纳未验证 → 最高优先级 spike，需要真实 iPhone/iPad
+- ~~iOS Safari 存储配额~~ **已解除（见开放问题 #1）**；新注意点：配额随剩余空间波动，正式版传输前需查 `navigator.storage.estimate()` 预警
+- iOS OPFS **无 createWritable**，只有 createSyncAccessHandle（须在 Worker 中用）——正式版存储层直接按此实现（已随 spike 验证）
 - Safari 独立 PWA 模式（添加到主屏幕）下：下载行为、摄像头权限、分享行为与普通 tab 有差异
 - 路由器 AP 隔离 / 跨 VLAN → mDNS 直连失败（需文档化 fallback；无 STUN/TURN 可用）
 - 锁屏 / 后台杀连接 → Wake Lock（iOS 17+）+ 部分粒度续传缓解
