@@ -22,26 +22,40 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
 
+    // CORS：前端（GitHub Pages / localhost）跨域调用 /api/room；
+    // WebSocket 升级不受 CORS 约束，但统一响应头无害。
+    if (request.method === 'OPTIONS') {
+      return cors(new Response(null, { status: 204 }))
+    }
+
     if (request.method === 'GET' && url.pathname === '/') {
-      return json({ ok: true, service: 'localtransfer-signaling', spec: 'SPEC §5.2' })
+      return cors(json({ ok: true, service: 'localtransfer-signaling', spec: 'SPEC §5.2' }))
     }
 
     if (request.method === 'POST' && url.pathname === '/api/room') {
-      return json({ room: generateRoomCode() })
+      return cors(json({ room: generateRoomCode() }))
     }
 
     if (request.method === 'GET' && url.pathname === '/ws') {
       const room = url.searchParams.get('room') ?? ''
       if (!ROOM_CODE_RE.test(room)) {
-        return json({ error: 'invalid room code' }, 400)
+        return cors(json({ error: 'invalid room code' }, 400))
       }
       const id = env.ROOMS.idFromName(room)
       return env.ROOMS.get(id).fetch(request)
     }
 
-    return json({ error: 'not found' }, 404)
+    return cors(json({ error: 'not found' }, 404))
   },
 } satisfies ExportedHandler<Env>
+
+function cors(response: Response): Response {
+  const headers = new Headers(response.headers)
+  headers.set('Access-Control-Allow-Origin', '*')
+  headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+  headers.set('Access-Control-Allow-Headers', 'content-type')
+  return new Response(response.body, { status: response.status, headers })
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
