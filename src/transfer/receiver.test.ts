@@ -222,6 +222,38 @@ describe('Receiver — 续传位图（T06）', () => {
     expect(sink.writeChunk).not.toHaveBeenCalled()
   })
 
+  it('重启续传：stored 记录全部 done → doneFileIds() 上报已完整文件（补发完成通知）', () => {
+    const stored = RECORD([
+      {
+        fileId: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        partCount: 1,
+        parts: [{ index: 0, state: 'done', bitfield: '', sha256: 'E' }],
+      },
+    ])
+    const { receiver, controls } = resumeSetup()
+    receiver.onMeta(RESUME_META, stored)
+    // 存储记录已完整 → 无需再收块；UI 侧据此补 file_done（导出按钮）
+    expect(receiver.doneFileIds()).toEqual([0])
+    expect(controls.filter((c) => (c as { type?: string }).type === 'file_done')).toHaveLength(0) // 补发由 Controller 负责
+  })
+
+  it('重启续传：部分位图 → doneFileIds() 为空（仍需补块）', () => {
+    const stored = RECORD([
+      {
+        fileId: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        partCount: 1,
+        parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2), sha256: 'E' }],
+      },
+    ])
+    const { receiver } = resumeSetup()
+    receiver.onMeta(RESUME_META, stored)
+    expect(receiver.doneFileIds()).toEqual([])
+  })
+
   it('sha256 不匹配（文件被改）：该文件不续传，触发 onResumeMismatch', () => {
     const stored = RECORD([
       {

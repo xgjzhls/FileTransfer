@@ -65,6 +65,27 @@ export class ConnectionManager {
     await this.peer?.acceptAnswer(payload.sdp)
   }
 
+  // ── 离线二维码配对（T07，SPEC §5.3）：与 WS 路径同一 RtcPeer，不经过信令 ──
+
+  /** 生成 offer 载荷（发送端显示二维码；不经信令） */
+  async createQrOffer(): Promise<SignalPayload> {
+    const rtc = this.newPeer()
+    const sdp = await rtc.createOffer()
+    return { kind: 'offer', sdp }
+  }
+
+  /** 接受对方 offer 并生成 answer 载荷（接收端扫码后显示回码；不经信令） */
+  async handleQrOffer(payload: SignalPayload): Promise<SignalPayload> {
+    const rtc = this.newPeer()
+    const sdp = await rtc.acceptOffer(payload.sdp)
+    return { kind: 'answer', sdp }
+  }
+
+  /** 发送端收到对方 answer（扫码 / 粘贴） */
+  async handleQrAnswer(payload: SignalPayload): Promise<void> {
+    await this.peer?.acceptAnswer(payload.sdp)
+  }
+
   /** DataChannel 待发送字节数（Sender 背压） */
   get bufferedAmount(): number {
     return this.peer?.bufferedAmount ?? 0

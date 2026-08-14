@@ -166,3 +166,65 @@ describe('ConnectionManager — sendData 需要活动连接', () => {
     expect(latestRtc().sent).toEqual([JSON.stringify(meta)])
   })
 })
+
+describe('ConnectionManager — 离线二维码配对（T07，SPEC §5.3）', () => {
+  it('createQrOffer：创建 peer 并返回 offer 载荷（不经过信令）', async () => {
+    const { manager, signals } = setup()
+    const payload = await manager.createQrOffer()
+    expect(payload).toEqual({ kind: 'offer', sdp: 'compressed-offer' })
+    expect(latestRtc().createOfferCalls).toBe(1)
+    expect(signals).toEqual([]) // 关键：QR 路径不产生任何 WS 信令
+  })
+
+  it('handleQrOffer：接受 offer 并返回 answer 载荷（不经过信令）', async () => {
+    const { manager, signals } = setup()
+    const payload = await manager.handleQrOffer(OFFER_PAYLOAD)
+    expect(payload).toEqual({ kind: 'answer', sdp: 'compressed-answer' })
+    expect(latestRtc().acceptOfferCalls).toBe(1)
+    expect(latestRtc().offerSdp).toBe('remote-offer')
+    expect(signals).toEqual([])
+  })
+
+  it('handleQrAnswer：在既有 peer 上设置远端 answer', async () => {
+    const { manager } = setup()
+    await manager.createQrOffer()
+    const rtc = latestRtc()
+    await manager.handleQrAnswer(ANSWER_PAYLOAD)
+    expect(rtc.acceptAnswerCalls).toBe(1)
+    expect(rtc.answerSdp).toBe('remote-answer')
+  })
+
+  it('完整流程：A offer → B answer → A answer，数据面互通', async () => {
+    const a = setup()
+    const b = setup()
+    const offer = await a.manager.createQrOffer()
+    const aRtc = FakeRtc.last! // A 的 offerer peer
+    const answer = await b.manager.handleQrOffer(offer)
+    const bRtc = FakeRtc.last! // B 的 answerer peer
+    await a.manager.handleQrAnswer(answer)
+    expect(offer).toEqual({ kind: 'offer', sdp: 'compressed-offer' })
+    expect(answer).toEqual({ kind: 'answer', sdp: 'compressed-answer' })
+    expect(aRtc.acceptAnswerCalls).toBe(1) // 同一 peer 收 answer（新连接，非重建）
+    // 数据面：A.sendData → 真实场景经 DataChannel → B 的 RtcPeer 事件
+    a.manager.sendData('{"type":"meta"}')
+    bRtc.events.onDataMessage('{"type":"meta"}')
+    expect(b.data).toEqual(['{"type":"meta"}'])
+  })
+
+  it('新 QR 配对替换旧连接（旧 peer 被关闭）', async () => {
+    const { manager } = setup()
+    await manager.createQrOffer()
+    const first = latestRtc()
+    await manager.createQrOffer()
+    const second = latestRtc()
+    expect(first).not.toBe(second)
+    expect(first.closed).toBe(true)
+  })
+
+  it('RtcPeer 状态事件经 QR 路径透传（connState 驱动 UI）', async () => {
+    const { manager, states } = setup()
+    await manager.createQrOffer()
+    latestRtc().events.onState('connected')
+    expect(states.at(-1)).toBe('connected')
+  })
+})

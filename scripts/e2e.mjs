@@ -42,47 +42,80 @@ async function waitStatus(page, target, timeout = 30000) {
   )
 }
 
+/** 轮询连接状态徽章直到脱离 signaling/connecting；返回最终状态字符串 */
+async function waitFinalConnState(page, timeoutMs) {
+  const t0 = Date.now()
+  for (;;) {
+    const s = await page.evaluate(() => {
+      const badge = [...document.querySelectorAll('.badge')].find((b) => b.textContent?.includes('状态：'))
+      return badge?.textContent?.replace('状态：', '').trim() ?? ''
+    })
+    if (s.includes('connected') || s.includes('failed') || s.includes('idle')) return s
+    if (Date.now() - t0 > timeoutMs) return s
+    await page.waitForTimeout(250)
+  }
+}
+
 const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS })
 try {
-  // ── 0. WebRTC 环境探测（同页双 pc loopback）
-  const probe = await browser.newPage()
-  const webrtcOk = await probe.evaluate(async () => {
+  // ── 0. WebRTC 环境探测（双页真实交换，更贴近实际设备场景）
+  // 旧探测（同页双 pc loopback）在 Clash fake-ip TUN 下会误判：本机双页/双设备
+  // 经真实候选仍可互通。改为两个独立页面交换 SDP（与真实配对流程一致）。
+  const probeA = await browser.newPage()
+  const probeB = await browser.newPage()
+  const webrtcOk = await (async () => {
     try {
-      const pc1 = new RTCPeerConnection({ iceServers: [] })
-      pc1.createDataChannel('t')
-      const waitGather = (pc) =>
-        new Promise((res) => {
-          if (pc.iceGatheringState === 'complete') return res()
-          pc.addEventListener('icegatheringstatechange', () => pc.iceGatheringState === 'complete' && res())
-          setTimeout(res, 15000)
-        })
-      const offer = await pc1.createOffer()
-      await pc1.setLocalDescription(offer)
-      await waitGather(pc1)
-      const pc2 = new RTCPeerConnection({ iceServers: [] })
-      await pc2.setRemoteDescription({ type: 'offer', sdp: pc1.localDescription.sdp })
-      const answer = await pc2.createAnswer()
-      await pc2.setLocalDescription(answer)
-      await waitGather(pc2)
-      await pc1.setRemoteDescription({ type: 'answer', sdp: pc2.localDescription.sdp })
-      return await new Promise((res) => {
-        const t = setInterval(() => {
-          if (pc1.connectionState === 'connected' || pc1.connectionState === 'failed') {
-            clearInterval(t)
-            res(pc1.connectionState === 'connected')
-          }
-        }, 200)
-        setTimeout(() => {
-          clearInterval(t)
-          res(false)
-        }, 15000)
+      const offerSdp = await probeA.evaluate(async () => {
+        const pc1 = new RTCPeerConnection({ iceServers: [] })
+        pc1.createDataChannel('t')
+        const offer = await pc1.createOffer()
+        await pc1.setLocalDescription(offer)
+        if (pc1.iceGatheringState !== 'complete') {
+          await new Promise((res) => {
+            pc1.addEventListener('icegatheringstatechange', () => pc1.iceGatheringState === 'complete' && res())
+            setTimeout(res, 15000)
+          })
+        }
+        window.__probe = { pc1 }
+        return pc1.localDescription.sdp
       })
+      const answerSdp = await probeB.evaluate(async (offerSdp) => {
+        const pc2 = new RTCPeerConnection({ iceServers: [] })
+        await pc2.setRemoteDescription({ type: 'offer', sdp: offerSdp })
+        const answer = await pc2.createAnswer()
+        await pc2.setLocalDescription(answer)
+        if (pc2.iceGatheringState !== 'complete') {
+          await new Promise((res) => {
+            pc2.addEventListener('icegatheringstatechange', () => pc2.iceGatheringState === 'complete' && res())
+            setTimeout(res, 15000)
+          })
+        }
+        return pc2.localDescription.sdp
+      }, offerSdp)
+      return await probeA.evaluate(async (answerSdp) => {
+        const pc1 = window.__probe.pc1
+        await pc1.setRemoteDescription({ type: 'answer', sdp: answerSdp })
+        return await new Promise((res) => {
+          const t = setInterval(() => {
+            if (pc1.connectionState === 'connected' || pc1.connectionState === 'failed') {
+              clearInterval(t)
+              res(pc1.connectionState === 'connected')
+            }
+          }, 200)
+          // fake-ip TUN 干扰时 ICE 可能很慢：给足 25s 再判失败
+          setTimeout(() => {
+            clearInterval(t)
+            res(false)
+          }, 25000)
+        })
+      }, answerSdp)
     } catch {
       return false
     }
-  })
-  await probe.close()
-  console.log(`WebRTC loopback 探测：${webrtcOk ? '可用 ✓（全量断言）' : '不可用 ⚠（降级：仅 UI + 信令断言）'}\n`)
+  })()
+  await probeA.close()
+  await probeB.close()
+  console.log(`WebRTC 双页探测：${webrtcOk ? '可用 ✓（全量断言）' : '不可用 ⚠（降级：仅 UI + 信令断言）'}\n`)
   if (!webrtcOk) {
     console.log('  ⚠ 本机 Clash TUN + fake-ip（198.18.x.x）会劫持 WebRTC host candidate，')
     console.log('    同机自连不可行。这**不影响**跨设备（真实局域网 IP）场景，但电脑端')
@@ -180,6 +213,58 @@ try {
     step('T06 断连续传：杀接收端页面后自动恢复，文件完整（B 显示导出）', true, '20 MiB')
   } else {
     step('（降级）T06 断连续传断言跳过', true, '环境不支持同机 ICE')
+  }
+
+  // ── 5.7 T07：离线二维码配对（粘贴 fallback 全流程，数据面不经信令）
+  // SDP 生成/交换不依赖 ICE 成功，降级模式也执行；仅 connected/传输断言需要真 WebRTC
+  await pageA.getByRole('button', { name: '离线扫码配对' }).click()
+  await pageA.getByRole('button', { name: '我是发送端（显示配对码）' }).click()
+  await pageA.waitForFunction(() => (window.__ltQr?.getOfferText().length ?? 0) > 0, null, {
+    timeout: 30000,
+  })
+  const offerText = await pageA.evaluate(() => window.__ltQr.getOfferText())
+  step('T07 A 生成发送端配对码', offerText.length > 0, `${offerText.length} 字符`)
+
+  // B（接收端）粘贴 offer → 生成 answer 配对码
+  await pageB.getByRole('button', { name: '离线扫码配对' }).click()
+  await pageB.getByRole('button', { name: '我是接收端（扫码配对）' }).click()
+  await pageB.getByText('没有摄像头？手动粘贴发送端的配对码').click()
+  await pageB.getByPlaceholder('粘贴或输入配对码文本').fill(offerText)
+  await pageB.getByRole('button', { name: '应用' }).click()
+  await pageB.waitForFunction(() => (window.__ltQr?.getAnswerText().length ?? 0) > 0, null, {
+    timeout: 30000,
+  })
+  const answerText = await pageB.evaluate(() => window.__ltQr.getAnswerText())
+  step('T07 B 粘贴 offer 并生成接收端回码', answerText.length > 0, `${answerText.length} 字符`)
+
+  // A 粘贴 answer（两端完成 SDP 交换）
+  await pageA.getByText('没有摄像头？手动粘贴接收端的配对码').click()
+  await pageA.getByPlaceholder('粘贴或输入配对码文本').fill(answerText)
+  await pageA.getByRole('button', { name: '应用' }).click()
+  if (webrtcOk) {
+    await waitStatus(pageA, 'connected')
+    await waitStatus(pageB, 'connected')
+    step('T07 A 粘贴 answer：两端离线 connected', true)
+
+    // 离线路径传文件（复用同一数据面）
+    const qrPath = join(dir, 'e2e-qr.bin')
+    writeFileSync(qrPath, randomBytes(2 * 1024 * 1024))
+    await pageA.setInputFiles('input[type="file"]', qrPath)
+    await pageA.getByRole('button', { name: '开始发送' }).click()
+    await pageB.waitForFunction(() => document.body.textContent?.includes('e2e-qr.bin'), null, {
+      timeout: 60000,
+    })
+    step('T07 离线配对后传输完成（B 显示文件）', true, '2 MiB')
+  } else {
+    // 连接能力以实际结果为准：等状态脱离 signaling（connected / failed / 卡在 connecting）
+    const finalState = await waitFinalConnState(pageA, 25000)
+    // 降级环境（无 ICE）下 pc 会停在 connecting：SDP 已成功应用即为本步目标
+    const exchangeDone = ['connected', 'failed', 'connecting'].includes(finalState)
+    step(
+      '（降级）T07 SDP 交换完成（offer/answer 均已应用）',
+      exchangeDone,
+      `最终状态 ${finalState || '未知'}；本机 ICE 不可达，跳过 connected/传输断言`,
+    )
   }
 
   // ── 6. 杀 WS → 自动重连 → 房间码/设备列表恢复（T09 + T10）

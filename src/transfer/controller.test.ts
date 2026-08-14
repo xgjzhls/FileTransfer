@@ -454,6 +454,25 @@ describe('TransferController — 发送路径', () => {
     controller.handleData(encodeControl({ type: 'file_done', fileId: 3 }).buffer as ArrayBuffer)
     expect(events.onFileDone).toEqual([3])
   })
+
+  it('hasActiveSend：无发送为 false；发送中为 true；完成后为 false（可 resumeSend 但不算在途）', async () => {
+    const { controller } = setup()
+    expect(controller.hasActiveSend()).toBe(false)
+    const bytes = new Uint8Array(CHUNK_SIZE * 2)
+    const source: FileSource = {
+      name: 'h',
+      size: bytes.length,
+      slice: async (s, e) => bytes.subarray(s, e),
+    }
+    const p = controller.startSend([{ id: 0, name: 'h', size: bytes.length, source }])
+    expect(controller.hasActiveSend()).toBe(true) // buildMeta 阶段即在途
+    await p
+    expect(controller.hasActiveSend()).toBe(false) // 完成：不算在途（避免误触发旧批次续传）
+    const r = controller.resumeSend()
+    expect(controller.hasActiveSend()).toBe(true) // 续传进行中
+    await r
+    expect(controller.hasActiveSend()).toBe(false)
+  })
 })
 
 // ── T06 端到端：断连 → 恢复 → 只补缺失 ───────────────────────────────────────

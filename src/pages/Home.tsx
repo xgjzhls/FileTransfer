@@ -13,6 +13,7 @@ import { TransferController } from '../transfer/controller'
 import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
+import OfflinePair from './OfflinePair'
 import type { FileMeta } from '../protocol/transfer'
 import type { DeviceKind, PeerInfo } from '../protocol/signaling'
 
@@ -349,6 +350,13 @@ export default function Home() {
   async function connectTo(peerId: string) {
     peerIdRef.current = peerId
     setError('')
+    // 对端重载/断连后手动重建连接：旧连接可能仍显示 connected（ICE 失败检测有延迟），
+    // 此时在途发送的 Sender 还停在旧 dc 上。标记中断 + 取消旧发送循环——新连接
+    // 建立后自动走 resumeSend 续传（SPEC §3.3 disconnected → 重新 signal → 新 DC）。
+    if (controllerRef.current?.hasActiveSend()) {
+      interruptedRef.current = true
+      abortRef.current?.abort()
+    }
     try {
       await ensureManager().connectTo(peerId)
     } catch (e) {
@@ -567,6 +575,9 @@ export default function Home() {
           ))}
         </ul>
       </section>
+
+      {/* T07：离线二维码配对（无信令服务时；建连后完全复用在线数据面） */}
+      <OfflinePair manager={() => ensureManager()} connState={connState} />
 
       <section className="card">
         <h2>传输</h2>

@@ -56,6 +56,8 @@ export const RESUME_SAVE_MS = 2000
 const RESUME_GATE_TIMEOUT_MS = 10_000
 
 export class TransferController {
+  /** 发送是否在途（startSend 入口置位，结束清空；手动重连时触发续传的依据） */
+  private sendStarted = false
   private readonly receiver: Receiver
   private readonly transport: ChunkTransport
   private readonly events: ControllerEvents
@@ -90,6 +92,15 @@ export class TransferController {
     )
   }
 
+  /**
+   * 是否存在**在途**发送（手动重连时据此触发续传）。
+   * 仅覆盖未完成的发送（buildMeta 阶段 / sender 发送中）；已完成的发送
+   * （lastSend 保留）不算——避免向新对端误发旧批次（resumeSend 仍可用）。
+   */
+  hasActiveSend(): boolean {
+    return this.sendStarted || this.sender !== null
+  }
+
   /** DataChannel 数据入口（ConnectionManager.onData → 这里） */
   handleData(data: string | ArrayBuffer): void {
     if (typeof data === 'string') {
@@ -115,26 +126,31 @@ export class TransferController {
     signal?: AbortSignal,
     sessionId?: string,
   ): Promise<void> {
-    const meta = await this.buildMeta(files, signal, sessionId)
-    this.sendControl(meta)
-    const sender = new Sender(
-      this.transport,
-      {
-        onPartDone: (fileId, partIndex) => this.events.onPartDone?.(fileId, partIndex),
-        onFileDone: (fileId) => this.events.onFileDone(fileId),
-        onProgress: (f, c, t) => this.events.onProgress(f, c, t),
-      },
-    )
-    this.sender = sender
-    this.lastSend = { files, signal, sessionId: meta.sessionId }
-    const resume = this.pendingResume ?? await this.waitForResume()
-    this.pendingResume = null
-    await sender.send(
-      files.map((f) => ({ id: f.id, size: f.size, source: f.source })),
-      resume ?? undefined,
-      signal,
-    )
-    this.sender = null // 发送结束：之后到达的 part_reset 走「重启整批」分支
+    this.sendStarted = true
+    try {
+      const meta = await this.buildMeta(files, signal, sessionId)
+      this.sendControl(meta)
+      const sender = new Sender(
+        this.transport,
+        {
+          onPartDone: (fileId, partIndex) => this.events.onPartDone?.(fileId, partIndex),
+          onFileDone: (fileId) => this.events.onFileDone(fileId),
+          onProgress: (f, c, t) => this.events.onProgress(f, c, t),
+        },
+      )
+      this.sender = sender
+      this.lastSend = { files, signal, sessionId: meta.sessionId }
+      const resume = this.pendingResume ?? await this.waitForResume()
+      this.pendingResume = null
+      await sender.send(
+        files.map((f) => ({ id: f.id, size: f.size, source: f.source })),
+        resume ?? undefined,
+        signal,
+      )
+      this.sender = null // 发送结束：之后到达的 part_reset 走「重启整批」分支
+    } finally {
+      this.sendStarted = false
+    }
   }
 
   /** DataChannel 重连成功后自动续传：同 sessionId 重发 meta → resume 握手 → 只补缺失 */
@@ -158,6 +174,11 @@ export class TransferController {
     const effSession = this.receiver.sessionId
     this.events.onMeta(msg.files, effSession)
     this.initRecord(msg, effSession, record?.files)
+    // 重启续传：记录中已完整的文件无需再收块——补发完成通知（UI 导出入口 + 发送端状态）
+    for (const fileId of this.receiver.doneFileIds()) {
+      this.events.onFileDone(fileId)
+      this.sendControl({ type: 'file_done', fileId })
+    }
   }
 
   /** 匹配已有会话记录：先按 sessionId，再按「文件 name+size 集合」（发送端重载） */

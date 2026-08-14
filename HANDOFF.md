@@ -8,8 +8,8 @@
 
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
-- 分支：`main`（T09/T10/T06 已提交）；`prototype/storage-spike`（只读参考，勿动）
-- **T01-T05 代码全部完成，T09/T10/T06 代码完成**（178 单测 + e2e 11/11 绿）；**下一步 T07（离线二维码续传）或 T08（收尾）**
+- 分支：`main`（T01-T07 代码完成：T09/T10/T06/T07 已提交；T07 含 196 单测 + e2e 15/15（全量）/ 14/14（降级））；`prototype/storage-spike`（只读参考，勿动）
+- **T01-T05 代码全部完成，T09/T10/T06 代码完成，T07（离线二维码配对）代码完成**；**下一步 T08（收尾：照片门控/批量 UI/Wake Lock/多端真机联调）**
 
 ## 已有产物
 | 路径 | 内容 |
@@ -17,7 +17,7 @@
 | `CONTEXT.md` / `SPEC.md` | 约束词汇 / 正式规格（v1 定稿） |
 | `decisions/adr/0001-0005` | 架构决策 |
 | `.scratch/transfer/issues/T01-T10` | 实现票；T01-T05 状态已更新，T09/T10 为新开修复票 |
-| `src/` | 前端：`pages/`(Home/Settings/Spike) + `protocol/`(信令+传输消息类型) + `signaling/`(WS 客户端) + `webrtc/`(RtcPeer/ConnectionManager/sdpCodec/diagnostics) + `transfer/`(Sender/Receiver/Controller/framing/export) + `storage/`(OPFS 引擎+Worker+adapter+SessionStore+cleanup) |
+| `src/` | 前端：`pages/`(Home/Settings/Spike/**OfflinePair**) + `qr/`(**qrCodec/qrRender/qrScan**) + `protocol/`(信令+传输消息类型) + `signaling/`(WS 客户端) + `webrtc/`(RtcPeer/ConnectionManager/sdpCodec/diagnostics) + `transfer/`(Sender/Receiver/Controller/framing/export) + `storage/`(OPFS 引擎+Worker+adapter+SessionStore+cleanup) |
 | `server/` | CF Worker 信令：index(路由)+roomDo(DO)+roomCore(纯逻辑)+roomCode；`smoke.mjs` |
 | `scripts/` | `e2e.mjs`（Playwright 点击测试）、`bench.mjs`（传输测速） |
 | `.local-certs/` | 自签测试证书（**已入库**，新设备直接用；server.key 为测试私钥） |
@@ -25,11 +25,11 @@
 | `docs/` | Pages 构建产物（main 分支 /docs，用户已设 Pages 源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ **T06 ✅**）
-- **下一步：T07（离线二维码续传，复用 T06 的 resume 握手）或 T08（收尾：照片门控/批量 UI/Wake Lock/多端真机联调）**
-- 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
-- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、**T06 e2e 断连续传用例（需真 WebRTC 环境）** —— 桌面 e2e 已全绿（本机 Clash fake-ip 降级模式），真机未验
-- `npm test` 178/178 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）11/11 绿
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ T06 ✅ **T07 ✅**）
+- **下一步：T08（收尾：照片门控/批量 UI/Wake Lock/孤儿清理集成/多端真机联调，含 T07 验收 6 + T06 断连续传真机）**
+- 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07 ✅；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
+- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、T06 断连续传（e2e 桌面已绿，真机未验）、**T07 验收 6（两部 iPhone / iPhone+Mac 纯局域网扫码配对传输）**
+- `npm test` 196/196 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）全量 15/15（WebRTC 可用时）/ 降级 14/14（本机 Clash fake-ip 干扰时：仅 UI + 信令 + T07 SDP 交换）
 
 ## 本地测试环境（全本地，绕开 Cloudflare 网络问题）——关键
 用户网络：DNS 被 Clash fake-ip 劫持（198.18.x.x），不开系统代理/TUN 无法直连 Cloudflare；**开发测试一律走本地信令**：
@@ -54,9 +54,10 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 
 ## 测试与验证
 - 单测：`npm test`（Vitest，178 个，含 storage/webrtc/transfer/signaling/server）
-- **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→无 JS 错；WebRTC 环境自动探测降级）
+- **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→T06 断连续传→**T07 离线 QR 配对+传输**→杀 WS 重连→无 JS 错；WebRTC 环境双页探测自动降级）
   - e2e 默认走代理 `http://127.0.0.1:7890`（Clash），**Clash 退出后必须 E2E_NO_PROXY=1**
   - headless chromium 需 WebRTC 参数（脚本内置）：`--disable-features=WebRtcHideLocalIpsWithMdns --force-webrtc-ip-handling-policy=default_public_and_private_interfaces --allow-loopback-ice`
+  - **本机 Clash TUN 干扰同机 ICE 时自动降级**（仅 UI+信令+T07 SDP 交换断言）；彻底退出 Clash 后恢复全量（历史 15/15 全量通过记录）
 - **测速**：`E2E_NO_PROXY=1 node scripts/bench.mjs https://localhost:5173 300`（300MiB，实测 ~30 MiB/s）
 - 线上信令冒烟：`HTTPS_PROXY=http://127.0.0.1:7890 node server/smoke.mjs https://localtransfer-signaling.dirichray.workers.dev`（8/8）
 
@@ -70,6 +71,8 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - **`context.setOffline(true)` 只阻断新连接，不会关闭已建立的 WS**（e2e 杀 WS 用 `window.__ltSignaling.forceDisconnect()` 测试钩子，仅 DEV 构建暴露）
 - **信令 WS URL 带 `?device=<uuid>`（T10）**：服务端 `acceptWebSocket` 用它打 Hibernation tag（evict 后重建 presence）；老客户端不带也能用（无 tag → 不跨 evict 恢复）。消息格式（SPEC §5.2）未动
 - **续传（T06）**：64MiB 位图（256 帧/块）在接收端，节流 ≤2s 写 IndexedDB；发送端 meta 后等 resume_manifest 再发（只补缺失块）；DataChannel 断开自动重建并续传；「设置」页可删未完成会话。注意 e2e 断连续传用例需真 WebRTC（本机 Clash fake-ip 无同机 ICE 会降级跳过）
+- **离线二维码（T07）**：`src/qr/`（qrCodec 信封 v1 + qrRender + qrScan）+ `pages/OfflinePair.tsx`；发送端生成配对码（gzip+b64 的 {v:1,kind,sdp}）→ 接收端扫码/粘贴 → 接收端显示回码 → 发送端扫码/粘贴 → 建连（完全离线，数据面复用）；配对码实测 666-671 字符（上限 2800）；摄像头需 HTTPS 安全上下文；电脑无摄像头用「手动粘贴配对码文本」（双向）。e2e 用 `window.__ltQr` 钩子（DEV 仅）读配对码文本走粘贴路径
+- **e2e WebRTC 探测改为双页真实交换**：旧同页 loopback 在 Clash fake-ip TUN 下误判；双页（贴近真实双设备）探测可用时全量断言（传输/续传/QR 配对+传输），不可用降级为 UI+信令断言（含 T07 SDP 交换）
 - 照片门控 <300MiB（`PHOTO_GATE_BYTES`）；导出有「下载到本机」（Blob，>2GB 慎用）与「导出（分享）」
 - 孤儿数据：启动扫描 + 设置页清理（T02 已实现）
 
@@ -81,6 +84,8 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 5. 接收端完成文件后本地 UI 不更新（file_done 只发对端）→ Receiver 本地 onFileDone 事件
 6. 信令 API 缺 CORS 头 → 浏览器跨域拦截「创建房间报错」；已修（server cors() + OPTIONS）
 7. meta 的 part sha256 空占位 → 接收端校验必败无限 part_reset；发送端 startSend 先算真实哈希
+8. **接收端重启续传缺 file_done**（T07 全量 e2e 暴露）：快速传输在杀页面前已完成，重启后 meta 不再触发 file_done → UI 无导出。修：Receiver.doneFileIds() + Controller 补发
+9. **手动重连时在途发送不续传**（T07 全量 e2e 暴露）：对端重载后旧连接仍显示 connected（ICE 失败检测延迟），点「连接」关旧 peer 但 interruptedRef 未置位 → 旧 Sender 永久停在死 dc 的 bufferedamountlow 等待。修：connectTo 检测 hasActiveSend（仅**在途**）→ 置 interrupted + abort → 新连接自动续传
 
 ## 新电脑环境搭建（按序）
 1. Node ≥ 22；`git clone` + `npm install`

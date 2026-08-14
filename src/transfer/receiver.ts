@@ -105,6 +105,19 @@ export class Receiver {
     return this._sessionId
   }
 
+  /**
+   * 已完整（含从持久化记录恢复）的文件 id 列表。
+   * 重启续传时，记录中全部 part 已 done 的文件无需再收块——
+   * Controller 据此补发 file_done（UI 导出入口 + 通知发送端）。
+   */
+  doneFileIds(): number[] {
+    const ids: number[] = []
+    for (const [fileId, file] of this.files) {
+      if (file.parts.size > 0 && file.doneCount === file.parts.size) ids.push(fileId)
+    }
+    return ids
+  }
+
   onChunk(fileId: number, partIndex: number, chunkIndex: number, payload: Uint8Array): Promise<void> {
     const key = `${fileId}:${partIndex}`
     const prev = this.queues.get(key) ?? Promise.resolve()
