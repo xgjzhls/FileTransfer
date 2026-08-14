@@ -279,3 +279,51 @@ describe('Sender — part_reset 整 part 重传（T05）', () => {
     expect(transport.sent).toHaveLength(2)
   })
 })
+
+describe('Sender — 取消/中断（T08：中止抛 AbortError，不误标完成）', () => {
+  it('发送中被 abort → 抛 AbortError，不触发 onFileDone（取消 ≠ 完成）', async () => {
+    const { transport, events, sender } = setup()
+    const bytes = new Uint8Array(CHUNK_SIZE * 4).map((_, i) => i % 251)
+    const ac = new AbortController()
+    // 第一个 chunk 发出后卡在背压等待 → 中途取消
+    transport.bufferedAmount = BACKPRESSURE_LIMIT + 1
+    const p = sender.send([{ id: 0, size: bytes.length, source: sourceOf(bytes) }], undefined, ac.signal)
+    await vi.waitFor(() => expect(transport.sent.length).toBeGreaterThan(0))
+    ac.abort()
+    transport.bufferedAmount = 0
+    transport.drain()
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' })
+    expect(events.onFileDone).not.toHaveBeenCalled()
+    // 已发出的部分不产生 part_done
+    expect(events.onPartDone).not.toHaveBeenCalled()
+  })
+
+  it('多文件：已完成的文件标记 done，被取消的当前文件不标记', async () => {
+    const { transport, events, sender } = setup()
+    const bytes = new Uint8Array(CHUNK_SIZE * 2).map((_, i) => i % 251)
+    const ac = new AbortController()
+    // 文件 0 正常发完；文件 1 首个 chunk 后卡背压 → 取消
+    transport.bufferedAmount = 0
+    transport.send = (f) => {
+      const saved = transport.sent
+      saved.push(f)
+      // 文件 0 两个 chunk 发完后文件 1 开始 → 抬高背压卡住
+      if (saved.length >= 3) transport.bufferedAmount = BACKPRESSURE_LIMIT + 1
+    }
+    const p = sender.send(
+      [
+        { id: 0, size: bytes.length, source: sourceOf(bytes) },
+        { id: 1, size: bytes.length, source: sourceOf(bytes) },
+      ],
+      undefined,
+      ac.signal,
+    )
+    await vi.waitFor(() => expect(events.onFileDone).toHaveBeenCalledWith(0))
+    ac.abort()
+    transport.bufferedAmount = 0
+    transport.drain()
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' })
+    expect(events.onFileDone).toHaveBeenCalledTimes(1) // 仅文件 0
+    expect(events.onFileDone).toHaveBeenCalledWith(0)
+  })
+})

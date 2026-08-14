@@ -69,7 +69,7 @@ export class Sender {
   ): Promise<void> {
     const parts = planParts(file.size, PART_SIZE)
     for (const part of parts) {
-      if (signal?.aborted) return
+      if (signal?.aborted) throw abortError()
       const resumePart = resumeFile?.parts.find((p) => p.index === part.index)
       const chunks = this.scheduleChunks(part.size, resumePart)
       if (chunks.length > 0) {
@@ -107,7 +107,7 @@ export class Sender {
     const resetKey = `${file.id}:${partIndex}`
     let i = 0
     while (i < chunks.length) {
-      if (signal?.aborted) return
+      if (signal?.aborted) throw abortError()
       if (this.resets.has(resetKey)) {
         // part_reset（接收端清位图）→ 整 part 从头重发
         this.resets.delete(resetKey)
@@ -133,6 +133,12 @@ export class Sender {
       await waitForLow(this.transport)
     }
   }
+}
+
+function abortError(): Error {
+  const e = new Error('aborted')
+  e.name = 'AbortError'
+  return e
 }
 
 function waitForLow(transport: ChunkTransport): Promise<void> {

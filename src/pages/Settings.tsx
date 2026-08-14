@@ -193,6 +193,9 @@ export default function Settings() {
         <p className="muted">
           传输接收的文件暂存在本应用沙盒（OPFS），此操作会清空全部未导出的数据。
         </p>
+        <p className="bad">
+          ⚠ iOS 分区隔离：各浏览器/独立 PWA 的存储互不可见——传输与清理必须在同一浏览器/模式。
+        </p>
       </section>
 
       <section className="card">

@@ -491,7 +491,8 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
     ac.abort()
     transportA.drain() // 让发送循环退出
-    await run1
+    // T08：取消/中断 → sender 抛 AbortError（不再静默返回），未完成文件不标记 done
+    await expect(run1).rejects.toMatchObject({ name: 'AbortError' })
     transportA.pauseAfter = null // 第二轮不再背压暂停
 
     // 第二轮：重连（同 sessionId）→ 只补块 1（chunk 256..299）
@@ -521,7 +522,7 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
     ac.abort()
     transportA.drain()
-    await run1
+    await expect(run1).rejects.toMatchObject({ name: 'AbortError' })
     transportA.pauseAfter = null // 第二轮不再背压暂停
     await new Promise((r) => setTimeout(r, 2100)) // 等节流持久化落盘
     expect(store.records.size).toBe(1)
@@ -563,7 +564,7 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
     ac.abort()
     t1.drain()
-    await p1
+    await expect(p1).rejects.toMatchObject({ name: 'AbortError' })
     t1.pauseAfter = null // 第二轮不再背压暂停
     await new Promise((r) => setTimeout(r, 2100))
     expect(store.records.size).toBe(1)

@@ -8,8 +8,8 @@
 
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
-- 分支：`main`（T01-T07 代码完成：T09/T10/T06/T07 已提交；T07 含 196 单测 + e2e 15/15（全量）/ 14/14（降级））；`prototype/storage-spike`（只读参考，勿动）
-- **T01-T05 代码全部完成，T09/T10/T06 代码完成，T07（离线二维码配对）代码完成**；**下一步 T08（收尾：照片门控/批量 UI/Wake Lock/多端真机联调）**
+- 分支：`main`（T01-T07 代码完成，T08 代码完成：Wake Lock/取消重试/分区提示；T07 含 215 单测 + e2e 15/15（全量）/ 14/14（降级））；`prototype/storage-spike`（只读参考，勿动）
+- **T01-T05 代码全部完成，T09/T10/T06 代码完成，T07（离线二维码配对）代码完成，T08（收尾）代码完成**；**下一步：T08 真机验收（多端联调 + 照片门控实测 + 体验走查），验收即 v1**
 
 ## 已有产物
 | 路径 | 内容 |
@@ -25,8 +25,8 @@
 | `docs/` | Pages 构建产物（main 分支 /docs，用户已设 Pages 源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ T06 ✅ **T07 ✅**）
-- **下一步：T08（收尾：照片门控/批量 UI/Wake Lock/孤儿清理集成/多端真机联调，含 T07 验收 6 + T06 断连续传真机）**
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ T06 ✅ T07 ✅ **T08 ✅ 代码完成**）
+- **下一步：T08 真机验收（多端联调 + 照片门控阈值实测 + 体验走查），验收即 v1**
 - 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07 ✅；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
 - 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、T06 断连续传（e2e 桌面已绿，真机未验）、**T07 验收 6（两部 iPhone / iPhone+Mac 纯局域网扫码配对传输）**
 - `npm test` 196/196 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）全量 15/15（WebRTC 可用时）/ 降级 14/14（本机 Clash fake-ip 干扰时：仅 UI + 信令 + T07 SDP 交换）
@@ -53,7 +53,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - 证书 SAN：192.168.10.26 + 10.213.80.3 + 198.18.0.1 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/README.md`）
 
 ## 测试与验证
-- 单测：`npm test`（Vitest，178 个，含 storage/webrtc/transfer/signaling/server）
+- 单测：`npm test`（Vitest，215 个，含 storage/webrtc/transfer/signaling/server/wakelock）
 - **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→T06 断连续传→**T07 离线 QR 配对+传输**→杀 WS 重连→无 JS 错；WebRTC 环境双页探测自动降级）
   - e2e 默认走代理 `http://127.0.0.1:7890`（Clash），**Clash 退出后必须 E2E_NO_PROXY=1**
   - headless chromium 需 WebRTC 参数（脚本内置）：`--disable-features=WebRtcHideLocalIpsWithMdns --force-webrtc-ip-handling-policy=default_public_and_private_interfaces --allow-loopback-ice`
@@ -74,6 +74,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - **离线二维码（T07）**：`src/qr/`（qrCodec 信封 v1 + qrRender + qrScan）+ `pages/OfflinePair.tsx`；发送端生成配对码（gzip+b64 的 {v:1,kind,sdp}）→ 接收端扫码/粘贴 → 接收端显示回码 → 发送端扫码/粘贴 → 建连（完全离线，数据面复用）；配对码实测 666-671 字符（上限 2800）；摄像头需 HTTPS 安全上下文；电脑无摄像头用「手动粘贴配对码文本」（双向）。e2e 用 `window.__ltQr` 钩子（DEV 仅）读配对码文本走粘贴路径
 - **e2e WebRTC 探测改为双页真实交换**：旧同页 loopback 在 Clash fake-ip TUN 下误判；双页（贴近真实双设备）探测可用时全量断言（传输/续传/QR 配对+传输），不可用降级为 UI+信令断言（含 T07 SDP 交换）
 - 照片门控 <300MiB（`PHOTO_GATE_BYTES`）；导出有「下载到本机」（Blob，>2GB 慎用）与「导出（分享）」
+- **Wake Lock（T08）**：`navigator.wakeLock` 仅 iOS 17+/新版 Chrome 支持；传输活跃且连接在线才持有，断连/取消即释放（避免一直常亮耗电）；iOS 切后台自动释放锁，回前台自动重取（`src/wakelock/wakeLock.ts`）；不支持时 UI 提示降级
 - 孤儿数据：启动扫描 + 设置页清理（T02 已实现）
 
 ## 关键 bug 修复记录（e2e 驱动的坑，勿重蹈）
@@ -86,6 +87,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 7. meta 的 part sha256 空占位 → 接收端校验必败无限 part_reset；发送端 startSend 先算真实哈希
 8. **接收端重启续传缺 file_done**（T07 全量 e2e 暴露）：快速传输在杀页面前已完成，重启后 meta 不再触发 file_done → UI 无导出。修：Receiver.doneFileIds() + Controller 补发
 9. **手动重连时在途发送不续传**（T07 全量 e2e 暴露）：对端重载后旧连接仍显示 connected（ICE 失败检测延迟），点「连接」关旧 peer 但 interruptedRef 未置位 → 旧 Sender 永久停在死 dc 的 bufferedamountlow 等待。修：connectTo 检测 hasActiveSend（仅**在途**）→ 置 interrupted + abort → 新连接自动续传
+10. **取消把未完成文件标「完成 ✓」**（T08 体验走查暴露）：Sender 对 `signal.aborted` 静默 return 且循环后无条件 `onFileDone` → 取消/断连后 UI 显示完成、重试时被 `status !== 'done'` 过滤、接收端永久 stuck（还占着 Wake Lock）。修：sendFile/sendPart 中止改抛 AbortError、`onFileDone` 仅整文件完成触发；UI 取消 → 重置 pending 可重试，断连中断 → 等重连续传
 
 ## 新电脑环境搭建（按序）
 1. Node ≥ 22；`git clone` + `npm install`

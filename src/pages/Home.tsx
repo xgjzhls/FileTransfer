@@ -12,6 +12,8 @@ import { RtcPeer } from '../webrtc/peer'
 import { TransferController } from '../transfer/controller'
 import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
+import { WakeLockManager } from '../wakelock/wakeLock'
+import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
 import OfflinePair from './OfflinePair'
 import type { FileMeta } from '../protocol/transfer'
@@ -82,6 +84,21 @@ export default function Home() {
   const [recvItems, setRecvItems] = useState<RecvItem[]>([])
   const [exportMsg, setExportMsg] = useState('')
   const [sessionId, setSessionId] = useState('')
+  // T08 Wake Lock：传输期间保持屏幕常亮（iOS 17+）；状态驱动界面提示。
+  // 实例在 effect 内创建/销毁：StrictMode 双跑（同实例重放 effect）会重建 manager，
+  // dispose 是永久性的，不能在渲染期懒创建后跨 effect 复用。
+  const wakeRef = useRef<WakeLockManager | null>(null)
+  const [wakeState, setWakeState] = useState<WakeLockState>('idle')
+  useEffect(() => {
+    const m = (wakeRef.current ??= new WakeLockManager())
+    setWakeState(m.state) // 首帧对齐（如浏览器不支持 → unavailable）
+    const unsub = m.subscribe(setWakeState)
+    return () => {
+      unsub()
+      m.dispose()
+      wakeRef.current = null
+    }
+  }, [])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const recvMetaRef = useRef<FileMeta[]>([])
@@ -126,6 +143,7 @@ export default function Home() {
       abortRef.current?.abort()
       managerRef.current?.close()
       reconnectRef.current?.close()
+      // Wake Lock manager 由上面的 effect 管理（dispose + 置空 ref）
     }
   }, [])
 
@@ -138,6 +156,20 @@ export default function Home() {
       delete (window as unknown as { __ltSignaling?: unknown }).__ltSignaling
     }
   }, [])
+
+  /** T08：是否有在途传输（发送/接收任一活跃）且连接在线 —— 驱动 Wake Lock 与界面提示 */
+  const transferActive = useMemo(
+    () =>
+      connState === 'connected' &&
+      (sendItems.some((it) => it.status === 'transferring') ||
+        recvItems.some((it) => it.status === 'receiving')),
+    [sendItems, recvItems, connState],
+  )
+
+  // T08 Wake Lock：有在途传输 → 常亮；全部结束/取消/断连 → 释放（避免断线后一直常亮）
+  useEffect(() => {
+    void wakeRef.current?.setActive(transferActive)
+  }, [transferActive])
 
   // 页面关闭/切后台时把未落盘的续传位图写掉（崩溃最多重传 64MiB + 在途）
   useEffect(() => {
@@ -175,7 +207,16 @@ export default function Home() {
           },
           onProgress: (fileId, sent, total) => {
             setSendItems((prev) =>
-              prev.map((it) => (it.id === fileId ? { ...it, sentChunks: sent, totalChunks: total } : it)),
+              prev.map((it) =>
+                it.id === fileId
+                  ? {
+                      ...it,
+                      status: it.status === 'done' ? 'done' : 'transferring',
+                      sentChunks: sent,
+                      totalChunks: total,
+                    }
+                  : it,
+              ),
             )
           },
           onRecvProgress: (fileId, _part, received, total) => {
@@ -391,11 +432,19 @@ export default function Home() {
     setError('')
     setStatus('发送中…')
     abortRef.current = new AbortController()
+    // 立即置 transferring：waitChannel / meta 哈希（10GB 级可达数分钟）期间
+    // 也有取消按钮 + Wake Lock 常亮（T08：取消/重试体验）
+    setSendItems((prev) =>
+      prev.map((it) => (it.status === 'pending' ? { ...it, status: 'transferring' } : it)),
+    )
     // 等 DataChannel open，避免首帧（meta）被丢
     try {
       await managerRef.current?.waitChannel(10_000)
     } catch {
       setStatus('数据通道未就绪，请重试')
+      setSendItems((prev) =>
+        prev.map((it) => (it.status === 'transferring' ? { ...it, status: 'pending' } : it)),
+      )
       return
     }
     const sources = items.map((it) => ({
@@ -413,11 +462,16 @@ export default function Home() {
     }))
     try {
       await ensureController().startSend(sources, abortRef.current.signal)
-      if (abortRef.current.signal.aborted) setStatus('传输中断，等待重连自动续传…')
-      else setStatus('发送完成')
+      setStatus('发送完成')
     } catch (e) {
-      if ((e as Error).name === 'AbortError') setStatus('已取消')
-      else setError(e instanceof Error ? e.message : String(e))
+      if ((e as Error).name === 'AbortError') {
+        // 断连中断 → 自动续传流程接管；手动取消 → 重置为排队中可重试
+        setStatus(interruptedRef.current ? '传输中断，等待重连自动续传…' : '已取消')
+        // 重置为排队中：释放 Wake Lock、隐藏取消按钮；断连场景由 resume 重新置位
+        setSendItems((prev) =>
+          prev.map((it) => (it.status === 'transferring' ? { ...it, status: 'pending' } : it)),
+        )
+      } else setError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -581,6 +635,14 @@ export default function Home() {
 
       <section className="card">
         <h2>传输</h2>
+        {transferActive &&
+          (wakeState === 'held' ? (
+            <p className="ok" style={{ margin: '4px 0 8px' }}>✓ 屏幕常亮中（Wake Lock）</p>
+          ) : wakeState === 'denied' || wakeState === 'unavailable' ? (
+            <p className="bad" style={{ margin: '4px 0 8px' }}>
+              ⚠ 屏幕常亮不可用（iOS 17+ Safari / 新版 Chrome 支持），传输期间屏幕可能休眠。
+            </p>
+          ) : null)}
         {connState === 'connected' ? (
           <>
             <div className="row">
@@ -658,7 +720,10 @@ export default function Home() {
             )}
             {exportMsg && <p>{exportMsg}</p>}
             <p className="muted">
-              [T06 续传] 中断后可续传；[T07 离线二维码] 无网配对。
+              [T06 续传] 中断后可续传；[T07 离线二维码] 无网配对；[T08 常亮] 传输中保持屏幕常亮。
+            </p>
+            <p className="muted">
+              iOS 分区隔离：接收/导出与「设置 → 清理」必须在同一浏览器/模式（独立 PWA 各占独立存储）。
             </p>
           </>
         ) : (

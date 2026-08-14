@@ -147,8 +147,8 @@ export class TransferController {
         resume ?? undefined,
         signal,
       )
-      this.sender = null // 发送结束：之后到达的 part_reset 走「重启整批」分支
     } finally {
+      this.sender = null // 结束（含取消/中断）：之后到达的 part_reset 走「重启整批」分支
       this.sendStarted = false
     }
   }
