@@ -9,7 +9,7 @@
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
 - 分支：`main`（工作区含 T09 未提交改动）；`prototype/storage-spike`（只读参考，勿动）
-- **T01-T05 代码全部完成，T09（信令 WS 自动重连）代码完成**（12 单测 + e2e 11/11 绿）；**下一步 T10（DO presence 持久化）或 T06（续传，依赖 T09 已就绪）**
+- **T01-T05 代码全部完成，T09（信令 WS 自动重连）代码完成**（15 单测 + e2e 11/11 绿）；**下一步 T10（DO presence 持久化）或 T06（续传，依赖 T09 已就绪）**
 
 ## 已有产物
 | 路径 | 内容 |
@@ -29,7 +29,7 @@
 - **下一步：T10（DO presence 持久化，部署必现，T08 前置）→ 然后 T06 续传**（T06 验收 4 依赖的 T09 WS 重连已就绪）
 - 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现）
 - 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、**T09 真机断网恢复** —— 桌面 e2e 已全绿，真机未验
-- `npm test` 130/130 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）11/11 绿（含 T09 杀 WS→重连→列表恢复）
+- `npm test` 133/133 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）11/11 绿（含 T09 杀 WS→重连→列表恢复）
 
 ## 本地测试环境（全本地，绕开 Cloudflare 网络问题）——关键
 用户网络：DNS 被 Clash fake-ip 劫持（198.18.x.x），不开系统代理/TUN 无法直连 Cloudflare；**开发测试一律走本地信令**：

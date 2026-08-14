@@ -459,7 +459,11 @@ export default function Home() {
               </span>
               <button
                 onClick={() => void connectTo(peer.id)}
-                disabled={connState === 'signaling' || connState === 'connecting'}
+                disabled={
+                  wsState !== 'connected' ||
+                  connState === 'signaling' ||
+                  connState === 'connecting'
+                }
               >
                 {connState === 'signaling' || connState === 'connecting' ? '连接中…' : '连接'}
               </button>

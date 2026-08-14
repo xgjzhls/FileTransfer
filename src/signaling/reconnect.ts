@@ -3,8 +3,8 @@
  *
  * 在 SignalingClient（单 socket 路由）之上包一层连接生命周期：
  * WS 断开 → 指数退避（1s→2s→4s…封顶 30s）自动重连 → 重新 join 原房间码
- * → room_state 恢复设备列表。连续失败达上限（默认 10 次）放弃自动重连，
- * 转「offline」态，等用户手动 retry()。
+ * → room_state 恢复设备列表。最多自动重连 10 次（退避合计约 3 分钟）；
+ * 仍失败则转「offline」态，等用户手动 retry()。
  *
  * 状态机（T09 验收 1/2/3/4）：
  *   connecting → connected ⇄ reconnecting → offline（手动 retry 回到 connecting）
@@ -30,7 +30,7 @@ export interface ReconnectingSignalingClientOptions {
   initialDelayMs?: number
   /** 退避封顶（ms），默认 30000 */
   maxDelayMs?: number
-  /** 连续失败次数上限（达到后转 offline），默认 10 */
+  /** 自动重连次数上限（达到后放弃、转 offline），默认 10 */
   maxAttempts?: number
 }
 
@@ -65,13 +65,10 @@ export class ReconnectingSignalingClient {
     this.maxAttempts = options.maxAttempts ?? 10
   }
 
-  get state(): SignalingConnState {
-    return this._state
-  }
-
   /** 连接并 join 房间；可重复调用切换房间（自动关闭旧连接与定时器） */
   connect(url: string, room: string, device: DeviceInfo): void {
     this.close()
+    this.attempts = 0
     this.url = url
     this.room = room
     this.device = device
@@ -100,10 +97,14 @@ export class ReconnectingSignalingClient {
   }
 
   signal(to: string, payload: SignalPayload): void {
+    // 非 connected 时底层 socket 可能已关闭：send 会抛错，静默丢弃
+    //（断线期间对陈旧 peer 的点击不应产生异常；重连后 room_state 会刷新列表）
+    if (this._state !== 'connected') return
     this.client?.signal(to, payload)
   }
 
   leave(): void {
+    if (this._state !== 'connected') return
     this.client?.leave()
   }
 
@@ -146,6 +147,9 @@ export class ReconnectingSignalingClient {
   /** 一次连接失败：error/close 双事件只排程一次 */
   private fail(): void {
     if (this.closed || this.timer !== null) return
+    // 收尾失败的 socket：真实 WS 的 error 后总会跟随 close，但若只有 error
+    // （或已断开），先关掉旧连接，避免死 socket 残留再收到迟到事件
+    this.client?.close()
     this.attempts++
     if (this.attempts > this.maxAttempts) {
       this.setState('offline')

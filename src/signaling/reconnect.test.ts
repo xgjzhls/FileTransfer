@@ -42,6 +42,8 @@ const ROOM = 'K7Q2'
 const DEVICE: DeviceInfo = { id: 'dev-1', name: '我的 iPhone', kind: 'phone' }
 const PEER_B: PeerInfo = { id: 'dev-2', name: 'E2E-B', kind: 'desktop' }
 const PEER_C: PeerInfo = { id: 'dev-3', name: 'iPad', kind: 'tablet' }
+/** 默认退避序列：1s→2s→4s→8s→16s→30s 封顶（共 10 次重连） */
+const BACKOFF_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000]
 
 function setup(overrides: Partial<ConstructorParameters<typeof ReconnectingSignalingClient>[0]> = {}) {
   const { sockets, createSocket } = socketHarness()
@@ -118,6 +120,21 @@ describe('ReconnectingSignalingClient — 连接与 join（SPEC §5.2）', () =>
       JSON.stringify({ type: 'leave' }),
     ])
   })
+
+  it('非 connected 态 signal / leave 静默丢弃（不向已关闭 socket 发送）', async () => {
+    const { sockets, client } = setup()
+    client.connect(URL, ROOM, DEVICE)
+    sockets[0].fire('open')
+    sockets[0].fire('close')
+    const payload: SignalPayload = { kind: 'offer', sdp: 'v=0...' }
+    client.signal('dev-2', payload)
+    client.leave()
+    expect(sockets[0].sent).toEqual([joinMsg()])
+    await vi.advanceTimersByTimeAsync(1000)
+    sockets[1].fire('open')
+    client.signal('dev-2', payload)
+    expect(sockets[1].sent).toEqual([joinMsg(), JSON.stringify({ type: 'signal', to: 'dev-2', payload })])
+  })
 })
 
 describe('ReconnectingSignalingClient — 断线自动重连（T09 验收 1）', () => {
@@ -126,12 +143,11 @@ describe('ReconnectingSignalingClient — 断线自动重连（T09 验收 1）',
     client.connect(URL, ROOM, DEVICE)
     sockets[0].fire('open')
 
-    const delays = [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000]
-    for (let i = 0; i < delays.length; i++) {
+    for (let i = 0; i < BACKOFF_DELAYS.length; i++) {
       sockets[i].fire('close')
       expect(states[states.length - 1]).toBe('reconnecting')
       // 退避期间不新建 socket
-      await vi.advanceTimersByTimeAsync(delays[i] - 1)
+      await vi.advanceTimersByTimeAsync(BACKOFF_DELAYS[i] - 1)
       expect(sockets).toHaveLength(i + 1)
       // 到期才重连
       await vi.advanceTimersByTimeAsync(1)
@@ -176,6 +192,17 @@ describe('ReconnectingSignalingClient — 断线自动重连（T09 验收 1）',
     expect(sockets).toHaveLength(7) // 又回到 1s 起步
   })
 
+  it('error 不伴随 close（防御）：同样进入重连，旧 socket 被收尾', async () => {
+    const { sockets, client, states } = setup()
+    client.connect(URL, ROOM, DEVICE)
+    sockets[0].fire('open')
+    sockets[0].fire('error')
+    // 不 fire('close')：真实 WS 总会 close，但防御路径也要能重连
+    expect(states[states.length - 1]).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sockets).toHaveLength(2)
+  })
+
   it('error + close 双事件只排程一次重连', async () => {
     const { sockets, client } = setup()
     client.connect(URL, ROOM, DEVICE)
@@ -193,8 +220,7 @@ describe('ReconnectingSignalingClient — 放弃与手动恢复（T09 验收 2�
     client.connect(URL, ROOM, DEVICE)
     sockets[0].fire('open')
     // 前 10 次退避重连都失败（1,2,4,8,16,30×5）
-    const delays = [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000]
-    for (const d of delays) {
+    for (const d of BACKOFF_DELAYS) {
       sockets[sockets.length - 1].fire('close')
       await vi.advanceTimersByTimeAsync(d)
     }
@@ -206,6 +232,23 @@ describe('ReconnectingSignalingClient — 放弃与手动恢复（T09 验收 2�
     // 之后不再有任何重连
     await vi.advanceTimersByTimeAsync(300_000)
     expect(sockets).toHaveLength(11)
+  })
+
+  it('切换房间（connect 再调用）重置失败计数：不会继承上次的退避进度', async () => {
+    const { sockets, client, states } = setup({ maxAttempts: 2 })
+    client.connect(URL, ROOM, DEVICE)
+    sockets[0].fire('open')
+    sockets[0].fire('close')
+    await vi.advanceTimersByTimeAsync(1000)
+    sockets[1].fire('close') // 已有 2 次失败
+    // 切换房间：失败计数清零
+    client.connect('wss://x/ws?room=ABCD', 'ABCD', DEVICE)
+    sockets[2].fire('open')
+    sockets[2].fire('close')
+    expect(states[states.length - 1]).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(1000)
+    sockets[3].fire('open')
+    expect(states[states.length - 1]).toBe('connected')
   })
 
   it('retry() 从 offline 恢复：重置计数、立即重连、成功后 connected', async () => {
