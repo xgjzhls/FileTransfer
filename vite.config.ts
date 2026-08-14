@@ -41,5 +41,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts', 'server/src/**/*.test.ts'],
+    // sender 测试含 512MiB 分配 + SHA-256，CPU 争抢（并行 dev 服务）下易超 5s 默认值
+    testTimeout: 15000,
   },
 })

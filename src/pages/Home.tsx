@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { findOrphans, formatBytes, getStorageAdapter } from '../storage'
 import type { OrphanReport } from '../storage'
-import { createBrowserSocket, SignalingClient } from '../signaling/client'
+import { createBrowserSocket } from '../signaling/client'
 import type { SignalingEvents } from '../signaling/client'
+import { ReconnectingSignalingClient } from '../signaling/reconnect'
+import type { SignalingConnState } from '../signaling/reconnect'
 import { ConnectionManager } from '../webrtc/connection'
 import { RtcPeer } from '../webrtc/peer'
 import { TransferController } from '../transfer/controller'
@@ -15,6 +17,15 @@ import type { DeviceKind, PeerInfo } from '../protocol/signaling'
 
 /** 信令服务地址（.env 注入，T03 部署；形如 wss://host/ws） */
 const SIGNALING_WSS = import.meta.env.VITE_SIGNALING_WSS ?? ''
+
+/** 信令连接状态展示文案（T09：重连中 / 离线可重试） */
+const WS_STATE_LABEL: Record<SignalingConnState, string> = {
+  idle: '未连接',
+  connecting: '连接中…',
+  connected: '已连接',
+  reconnecting: '重连中…',
+  offline: '离线（可重试）',
+}
 
 function httpBaseOf(wssUrl: string): string {
   return wssUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://').replace(/\/ws$/, '')
@@ -54,7 +65,7 @@ export default function Home() {
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [wsState, setWsState] = useState<'idle' | 'connecting' | 'connected' | 'disconnected' | 'error'>('idle')
+  const [wsState, setWsState] = useState<SignalingConnState>('idle')
   const [diagIps, setDiagIps] = useState<string[]>([])
   const [diagMsg, setDiagMsg] = useState('')
 
@@ -76,7 +87,8 @@ export default function Home() {
     [],
   )
 
-  const signalRef = useRef<SignalingClient | null>(null)
+  const reconnectRef = useRef<ReconnectingSignalingClient | null>(null)
+  const roomRef = useRef('')
   const managerRef = useRef<ConnectionManager | null>(null)
   const controllerRef = useRef<TransferController | null>(null)
 
@@ -98,7 +110,17 @@ export default function Home() {
     return () => {
       abortRef.current?.abort()
       managerRef.current?.close()
-      signalRef.current?.close()
+      reconnectRef.current?.close()
+    }
+  }, [])
+
+  // e2e 测试钩子（scripts/e2e.mjs 断线重连用例）：仅 dev 构建暴露，生产无
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const hook = { forceDisconnect: () => reconnectRef.current?.forceDisconnect() }
+    ;(window as unknown as { __ltSignaling?: typeof hook }).__ltSignaling = hook
+    return () => {
+      delete (window as unknown as { __ltSignaling?: unknown }).__ltSignaling
     }
   }, [])
 
@@ -167,7 +189,7 @@ export default function Home() {
   function ensureManager(): ConnectionManager {
     if (!managerRef.current) {
       managerRef.current = new ConnectionManager(
-        { signal: (to, payload) => signalRef.current?.signal(to, payload) },
+        { signal: (to, payload) => reconnectRef.current?.signal(to, payload) },
         {
           onState: (s) => setConnState(s),
           onData: (data) => ensureController().handleData(data),
@@ -200,28 +222,24 @@ export default function Home() {
   }
 
   function joinRoom(code: string) {
+    roomRef.current = code
     setRoom(code)
     setError('')
-    setWsState('connecting')
-    const ws = createBrowserSocket(`${SIGNALING_WSS}?room=${code}`)
-    const client = new SignalingClient(ws, signalEvents)
-    signalRef.current = client
-    ws.on('open', () => {
-      client.join(code, device)
-      setWsState('connected')
-      setStatus(`已加入房间 ${code}`)
-    })
-    ws.on('error', () => {
-      setWsState('error')
-      setError('信令连接失败：无法连接信令服务（检查 Wi-Fi / 证书信任 / 服务是否运行）')
-      setConnState('idle')
-    })
-    ws.on('close', () => {
-      setWsState('disconnected')
-      setPeers([])
-      setConnState('idle')
-      setStatus('信令连接已断开')
-    })
+    if (!reconnectRef.current) {
+      reconnectRef.current = new ReconnectingSignalingClient({
+        createSocket: createBrowserSocket,
+        events: signalEvents,
+        onState: (s) => {
+          setWsState(s)
+          if (s === 'connected') setStatus(`已加入房间 ${roomRef.current}（信令已连接）`)
+          else if (s === 'reconnecting') setStatus('信令连接断开，自动重连中…（设备列表可能不是最新）')
+          else if (s === 'offline') setStatus('信令离线：多次重连失败，请检查网络 / 信令服务后手动重试')
+        },
+      })
+    }
+    setStatus(`正在连接信令服务，加入房间 ${code}…`)
+    // 断线后由客户端自动重连并重新 join 原房间（指数退避 1s→30s，最多 10 次）
+    reconnectRef.current.connect(`${SIGNALING_WSS}?room=${code}`, code, device)
   }
 
   /** 诊断：收集本机 WebRTC 候选 IP（连接失败时定位网络问题） */
@@ -386,11 +404,25 @@ export default function Home() {
         </div>
         {status && <p>{status}</p>}
         {error && <p className="bad">{error}</p>}
+        {wsState === 'reconnecting' && (
+          <p className="bad">⚠ 信令连接断开，自动重连中（指数退避 1s→30s，最多 10 次）…</p>
+        )}
+        {wsState === 'offline' && (
+          <p className="bad">
+            信令离线：自动重连已放弃。
+            <button
+              onClick={() => reconnectRef.current?.retry()}
+              style={{ marginLeft: 8, padding: '2px 10px' }}
+            >
+              重新连接
+            </button>
+          </p>
+        )}
 
         <details style={{ marginTop: 8 }}>
           <summary className="muted" style={{ cursor: 'pointer' }}>诊断（信令 / 本机候选 IP）</summary>
           <p className="mono" style={{ fontSize: 12 }}>
-            信令：{wsState} · {SIGNALING_WSS || '未配置'}
+            信令：{WS_STATE_LABEL[wsState]} · {SIGNALING_WSS || '未配置'}
           </p>
           <div className="row">
             <button onClick={() => void runDiag()} style={{ padding: '6px 10px', fontSize: 12 }}>
