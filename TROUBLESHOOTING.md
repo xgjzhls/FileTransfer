@@ -1,75 +1,67 @@
-# 手机无法访问本地 HTTPS 服务 —— 排查记录
+# 手机无法访问本地 HTTPS 服务 —— 排查记录（2026-08-14 修订版）
 
-> **2026-08-14** 真机联调：手机（10.213.80.248）和另一台设备都无法打开
-> `https://10.213.80.3:5173`，浏览器报"无法连接服务器"（转圈超时，**非**证书警告）。
-> 最终定位：**macOS 应用防火墙**。本文记录完整排查方法 + 修复步骤。
+> **最终根因：路由器/AP 的客户端隔离（AP Isolation / Client Isolation）**，与
+> Mac 配置、证书、应用都无关。排查途中一度误判为 macOS 应用防火墙（红鲱鱼），
+> 已更正。本文保留完整排查链与教训，供下次直接参考。
 
 ## 症状
 
-- Mac 本机 `curl -k https://10.213.80.3:5173` → **200**（服务本身正常）
-- 手机 / 其他同网设备 → 转圈超时 / "Safari 无法连接到服务器"
-- 不是"证书不受信任"提示 → 与 ca.crt 信任无关
+- Mac 本机一切正常：`curl -k https://10.213.80.3:5173` → 200、服务监听正常、
+  路由健康、网关 ping 通
+- 手机/其他设备：转圈超时 / "Safari 无法连接到服务器"（**非**证书警告）
+- 已确认：同 Wi-Fi（A-WIFI）、同网段（10.213.80.x）、手机无 VPN、ARP 能解析到手机
 
-## 根因（三层叠加）
+## 决定性证据（nc 双向 TCP 测试，30 秒出结论，无需 root）
 
-1. **macOS 应用防火墙开启**（`socketfilterfw` state=1）
-2. 跑 5173 的 node（nvm v24，未签名）和跑 8787 的 workerd **不在放行列表**
-   → 外部进来的连接被默认静默丢弃
-3. **Stealth 模式开启**：Mac 对探测包不回应 → 外部表现为"超时"而非"拒绝"，
-   极具迷惑性
-4. **坑**：事后把 node/workerd 加进放行列表，**对已运行的进程不生效**
-   （防火墙按进程缓存决策），必须**重启 dev 进程**后规则才起作用
+| 命令 | 结果 | 含义 |
+|---|---|---|
+| `nc -vz -w3 10.213.80.3 8000` | succeeded | Mac 本机服务正常 |
+| `nc -vz -w3 10.213.80.1 80` | succeeded | Mac → 路由器正常 |
+| `nc -vz -w3 10.213.80.248 80` | **timed out** | **客户端间 TCP 被网络拦截** |
+| `nc -vz -w3 10.213.80.248 443` | **timed out** | 同上（双向都验证过） |
+| `arp -d 10.213.80.248; ping; arp -an` | 能重新解析 | 二层可达，三层 TCP 被拦 |
 
-## 判断方法（决策树）
+**判据：路由器能通 + 客户端之间双向 TCP 不通 + ARP 二层可达 = 客户端隔离。**
 
-| # | 实验 | 做法 | 结论 |
-|---|------|------|------|
-| 0 | 本机自测 | `curl -sk https://<本机IP>:5173` | 200 → 服务端 OK，问题在链路 |
-| 1 | 第二设备对照组 | 另一台同网设备打开同一 URL | 它也失败 → 不是手机个例 |
-| 2 | 手机通 LAN 吗 | 手机 Safari 开 `http://<网关IP>` | 能开 → 手机网络本身正常 |
-| 3 | 路由器隔离? | Mac 上 `arp -an \| grep <手机IP>` | 有条目 → L2 通，**AP 隔离可排除** |
-| 4 | ping 手机 | `ping <手机IP>` | iOS 常不回应 ICMP，**不能作数** |
-| 5 | **关防火墙对照** | `--setglobalstate off` 后手机重试 | 手机能开 → **实锤是防火墙** |
+## 排查弯路与教训
 
-关键区分点：**能通 = 路由器 OK；设备互访失败但 L2（ARP）正常 = Mac 侧拦截**。
-"所有外部设备都进不来、Mac 本机一切正常"是 Mac 防火墙的典型指纹。
+1. **macOS 应用防火墙**：一度被怀疑（开启时连不上），但关闭后依然连不上 → 排除。
+   教训：单变量实验时，"防火墙开关"与"网络状态变化"发生了时间耦合，误判因果。
+2. **证书 SAN**：重新签发过含新 IP 的证书，但证书问题症状是"警告"，不是"无法连接" → 排除。
+3. **tcpdump 抓包**：两次都在 Wi-Fi 接口上卡死（进程不退出、文件 0 字节），得到
+   误导性的"0 包"结论。**教训：抓包前必须先自检**（对目标端口发一个自己的包验证
+   管线通），否则 0 包不说明任何问题。
+4. **决定性工具是 nc 双向测试**：不需要 root、不需要抓包、不需要用户配合，一把梭。
 
-## 修复步骤
+## 解决方案
 
-```bash
-# 1. 放行两个进程（需要管理员权限；GUI：系统设置 → 网络 → 防火墙 → 选项）
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \
-  "$HOME/.nvm/versions/node/v24.12.0/bin/node" --allow
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add \
-  "<repo>/node_modules/@cloudflare/workerd-darwin-64/bin/workerd" --allow
-
-# 2. 关闭 Stealth 模式（不关则外部连接表现为"超时"）
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off
-
-# 3. 关键：重启 dev 进程，放行规则才对运行中的进程生效
-#    杀掉 vite / wrangler dev 后重新启动：
-cd <repo> && VITE_HTTPS=1 npm run dev
-cd <repo>/server && npx wrangler dev --port 8787 --ip 0.0.0.0 \
-  --local-protocol https --https-key-path ../.local-certs/server.key \
-  --https-cert-path ../.local-certs/server.crt
-```
+1. **如果是自己的路由器**：登录 `http://10.213.80.1`，关闭
+   "AP 隔离 / 客户端隔离 / 访客隔离"，或把设备切到未隔离的 SSID / 频段。
+2. **如果是共享 / 园区 / 办公网络（无法改设置）**：
+   - **iPhone 热点**：Mac 连手机热点 → 双方 172.20.10.x，无隔离
+     （注意：Mac 的 IP 会变，证书 SAN 需补新 IP 或手机临时信任）
+   - **Mac 开热点（互联网共享）**：Mac 分享当前网络，手机连 Mac 的热点
+   - **网线直连**：Mac ↔ 手机（USB-C 转 RJ45）
+3. **应用层影响**：客户端隔离的网络下，WebRTC P2P（两台设备互传文件）也无法工作
+   ——host candidate（局域网 IP）被拦、项目无 TURN 中继。**此类网络跑不了局域网
+   传输应用**，不是应用 bug。
 
 ## 检查清单（手机连不上时按序排查）
 
-1. [ ] 手机与电脑同一 Wi-Fi、IP 同网段（10.213.80.x）
-2. [ ] 本机 `curl -sk https://<IP>:5173` 通（服务端 OK）
-3. [ ] 手机能打开路由器管理页 → 手机网络正常
-4. [ ] 路由器未开 AP 隔离/访客隔离（Mac `arp -an` 能见手机条目）
-5. [ ] macOS 防火墙：node + workerd 在放行列表、Stealth 已关
-6. [ ] dev 进程是在放行**之后**重启的
-7. [ ] 手机已装并"完全信任" ca.crt（否则报证书警告，症状不同）
+1. [ ] 同 Wi-Fi、同网段（设置里确认，IP 为 10.213.80.x）
+2. [ ] 本机自测：`curl -k https://<MacIP>:5173` 通
+3. [ ] 手机能打开路由器管理页 `http://<网关IP>`
+4. [ ] **nc 双向测试**（决定性）：Mac `nc -vz -w3 <手机IP> 80` 超时 = 网络隔离
+5. [ ] 路由器设置：AP 隔离 / 客户端隔离 / 访客网络
+6. [ ] 证书：手机已装并完全信任 ca.crt（否则报证书警告，症状不同）
 
 ## 命令速查
 
 ```bash
-/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate   # 防火墙状态
-/usr/libexec/ApplicationFirewall/socketfilterfw --listapps         # 放行列表
-/usr/libexec/ApplicationFirewall/socketfilterfw --setstealthmode off
-lsof -nP -iTCP -sTCP:LISTEN | grep -E "5173|8787"                  # 监听端口
-curl -sk https://10.213.80.3:5173/                                 # 本机自测
+nc -vz -w3 <IP> <port>                              # TCP 连通性（决定性测试）
+arp -d <IP>; ping -c1 <IP>; arp -an | grep <IP>     # 二层可达性复核
+curl -sk https://10.213.80.3:5173/                  # 本机自测
+lsof -nP -iTCP -sTCP:LISTEN | grep -E "5173|8787"   # 监听端口
+/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate  # 防火墙状态
+# tcpdump 抓包前务必自检管线（对目标端口先发一个自己的包），否则 0 包≠无流量
 ```

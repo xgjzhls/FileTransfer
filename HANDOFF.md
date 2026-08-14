@@ -48,7 +48,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - `.env.development`：`VITE_SIGNALING_WSS=wss://192.168.10.26:8787/ws`（换机后若 IP 变化改这里）
   - **2026-08-14 本机 IP 已变为 10.213.80.3**，证书已重签（SAN 加入 10.213.80.3 + 198.18.0.1）；`.env.development` 现指向 `wss://10.213.80.3:8787/ws`，手机可直接用；e2e 若想免证书问题可临时改回 `wss://localhost:8787/ws`（SAN 含 localhost）
 - **手机访问前需信任 ca.crt**（`ca.crt` 在仓库 .local-certs/，发给手机安装 + 完全信任；一次性）
-- **手机连不上（超时/无法连接）排查见 `TROUBLESHOOTING.md`**：2026-08-14 实锤为 macOS 应用防火墙（node/workerd 需放行 + 关 Stealth + 重启 dev 进程）
+- **手机连不上（超时/无法连接）排查见 `TROUBLESHOOTING.md`**：2026-08-14 最终实锤为**路由器 AP 隔离**（nc 双向测试：Mac→手机 80/443 均超时、路由器通；macOS 防火墙曾误判，已更正）
 - 电脑浏览器访问 https://localhost:8787 点「高级→继续前往」豁免一次，或 sudo 装 CA 到系统钥匙串
 - 证书 SAN：192.168.10.26 + 10.213.80.3 + 198.18.0.1 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/README.md`）
 
