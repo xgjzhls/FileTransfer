@@ -19,3 +19,9 @@
 ## 备注
 - 候选：是否用 `pc.onconnectionstatechange` 统一状态；重连策略（指数退避）留 T06 细化，本票只做到「断开可手动重连」
 - 本票完成后即 tracer bullet：可演示「发现→配对→握手」，后续票逐步加能力
+
+## 已知问题（2026-08-14 调查）
+- **现象**：经常看不到加入房间的人
+- **根因 1（本地主因）**：客户端无自动重连，`ws.on('close')` 即 `setPeers([])`（Home.tsx），且无手动重连入口 → wrangler dev 重启 / Clash 抖动 / 锁屏后设备列表永久空 → 修复见 **T09**
+- **根因 2（部署必现）**：DO 用 WebSocket Hibernation API（`acceptWebSocket`）但 `RoomCore.peers` 仅存内存；DO evict 后唤醒时 core 为空 → 新设备 join 只见自己、老设备收不到广播 / 被 "join first" 拒绝 → 修复见 **T10**
+- **根因 3（dev 抖动）**：React StrictMode 双挂载 → 刷新即 join→leave→join（`device.id` 每次 mount 重新生成）；放大部分场景，保持不动

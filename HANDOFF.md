@@ -16,7 +16,7 @@
 |---|---|
 | `CONTEXT.md` / `SPEC.md` | 约束词汇 / 正式规格（v1 定稿） |
 | `decisions/adr/0001-0005` | 架构决策 |
-| `.scratch/transfer/issues/T01-T08` | 实现票；T01-T05 状态已更新 |
+| `.scratch/transfer/issues/T01-T10` | 实现票；T01-T05 状态已更新，T09/T10 为新开修复票 |
 | `src/` | 前端：`pages/`(Home/Settings/Spike) + `protocol/`(信令+传输消息类型) + `signaling/`(WS 客户端) + `webrtc/`(RtcPeer/ConnectionManager/sdpCodec/diagnostics) + `transfer/`(Sender/Receiver/Controller/framing/export) + `storage/`(OPFS 引擎+Worker+adapter+SessionStore+cleanup) |
 | `server/` | CF Worker 信令：index(路由)+roomDo(DO)+roomCore(纯逻辑)+roomCode；`smoke.mjs` |
 | `scripts/` | `e2e.mjs`（Playwright 点击测试）、`bench.mjs`（传输测速） |
@@ -26,8 +26,8 @@
 
 ## 当前进度与下一步
 - 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅）
-- **下一步：T06 续传**（bitfield + resume_manifest + 自动重连）
-- 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08
+- **下一步：T06 续传**（bitfield 粒度 64MiB + resume_manifest + 自动重连）；前置修复 **T09**（信令 WS 自动重连）与 **T10**（DO presence 持久化）
+- 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08；T09 → T06（前置）；T10 → T08（部署必现）
 - 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）—— 桌面 e2e 已全绿，真机未验
 - `npm test` 118/118 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）6/6 绿
 

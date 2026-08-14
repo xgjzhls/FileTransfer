@@ -23,3 +23,9 @@
   - 接收端需持久化 manifest/bitfield（IndexedDB 节流写入）
   - 续传握手增加复杂度（resume_manifest 交换）
   - ordered 吞吐在丢包高的链路上不如 unordered（[v2] 再评估；写盘路径已兼容）
+
+## 修订（2026-08-14，Q2 讨论）
+- **chunk 实为 256KiB 传输帧**：DataChannel maxMessageSize（Chrome/WebKit 262144）硬上限，实测 1MiB 消息抛错；本文「1MiB chunk」描述作废，以 SPEC §3.1 为准
+- **续传粒度定为 64MiB 续传块**（决策 1 修订）：1 bit = 256 帧；每 part（512MiB）8 bit；10GB 文件共 160 bit
+- 崩溃最多重传 64MiB + 在途（原设计 ≤32MiB）
+- 理由：bitfield 尺寸缩小一个数量级；Sender/Receiver 仅在 64MiB 边界置位，framing 与写盘路径零改动

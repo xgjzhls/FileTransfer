@@ -1,6 +1,6 @@
 # LocalTransfer — 技术规格说明书 (SPEC)
 
-> 状态：已定稿（2026-08-13）。依据：CONTEXT.md（约束/词汇）、decisions/adr/（决策）、prototype/storage-spike 分支（spike 验证结论）。
+> 状态：已定稿（2026-08-13；2026-08-14 修订续传粒度，见 §3.1/§3.4）。依据：CONTEXT.md（约束/词汇）、decisions/adr/（决策）、prototype/storage-spike 分支（spike 验证结论）。
 > 范围：v1（可用优先；性能优化项标注 [v2]）。
 
 ## 1. 目标与非目标
@@ -25,7 +25,8 @@
 | 参数 | 值 | 说明 |
 |---|---|---|
 | part 大小 | 512 MiB（末 part 可小） | 存储/校验/「已完成」原子单位 |
-| chunk 大小 | 256 KiB（末 chunk 可小） | 传输单位；每 part ≤2048 chunk。payload 上限取浏览器 DataChannel maxMessageSize（Chrome/WebKit 262144）减去帧头（13B）后的 256KiB-64；CONTEXT 词汇表允许 256KB–1MB |
+| chunk 大小 | 256 KiB（末 chunk 可小） | 传输帧（单条 DataChannel 消息）；每 part ≤2048 帧。payload 上限取浏览器 DataChannel maxMessageSize（Chrome/WebKit 262144）减去帧头（13B）后的 256KiB-64 |
+| 续传粒度（bitfield） | 64 MiB（= 256 帧） | 崩溃恢复原子单位；每 part 8 bit；崩溃最多重传 64MiB + 在途 |
 | part 校验 | SHA-256 | part 收齐后读回整文件校验 |
 | DataChannel | ordered:true, reliable | [v2] unordered + 应用层重传 |
 | 背压阈值 | bufferedAmount > 8 MiB 暂停排程 | 发送端节流 |
@@ -43,7 +44,7 @@ meta           { "type":"meta", "sessionId":"<uuid>", "files":[{
                    "parts":[{ "index":0, "size":536870912, "sha256":"<hex>" }] }] }
 resume_manifest{ "type":"resume_manifest", "files":[{
                    "id": 0, "parts":[{ "index":0, "state":"done" | "partial",
-                   "bitfield":"<base64, 每 part 512bit>" }] }] }
+                   "bitfield":"<base64, 每 part 8 bit（粒度 64MiB）>" }] }] }
 part_done      { "type":"part_done", "fileId":0, "partIndex":0, "sha256":"<hex>" }
 file_done      { "type":"file_done", "fileId":0 }
 bye | error | cancel   { "type":"...", "reason"?: "..." }
@@ -62,10 +63,10 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 1. 新 DataChannel 建立
 2. 发送端发 `meta`（sessionId + 完整文件/part 清单）
 3. 接收端回 `resume_manifest`：`done` 的 part 直接跳过；`partial` 的 part 附 bitfield
-4. 发送端计算缺失集合：补发缺失 chunk；无记录 part 全发
+4. 发送端计算缺失集合：补发缺失 64MiB 续传块（块内整发）；无记录 part 全发
 5. part 收齐 → 接收端读回 OPFS 整体 SHA-256 校验 → `part_done`；失败 → 该 part bitfield 清空重传
 6. 文件全部 part done → `file_done` → 进入导出流程
-7. 接收端为权威状态：manifest + bitfield 持久化到 IndexedDB，节奏 ≤2s 或每 32 chunk（崩溃最多重传 32 MiB）
+7. 接收端为权威状态：manifest + bitfield 持久化到 IndexedDB，节流 ≤2s（bitfield 粒度 64MiB → 崩溃最多重传 64MiB + 在途）
 8. 发送端页面重载后：重新选文件 → 按 `name + size` 与 manifest 匹配 → 继续（File 对象易失，不持久化）
 
 ### 3.5 发送顺序与进度
