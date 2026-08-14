@@ -45,6 +45,14 @@ export class ConnectionManager {
     this.signal.signal(peerId, { kind: 'offer', sdp })
   }
 
+  /**
+   * 断连后重建 DataChannel（T06 自动续传）：与 connectTo 相同——新 RtcPeer + 重新
+   * offer（旧连接已 failed/closed 时调用）。
+   */
+  async reconnectTo(peerId: string): Promise<void> {
+    await this.connectTo(peerId)
+  }
+
   /** 收到对方 offer：本端为 answer 端，自动回 answer */
   async handleOffer(from: string, payload: SignalPayload): Promise<void> {
     const rtc = this.newPeer()

@@ -1,11 +1,18 @@
 /**
- * TransferController —— 传输协调（T05）。
+ * TransferController —— 传输协调（T05 + T06 续传）。
  *
  * 装配接收端（Receiver）与发送端（Sender），统一 framing 解析：
  *   binary → parseChunk（chunk 数据）| parseControl（JSON 控制帧）
  *   string → 裸 JSON 控制消息（T04 兼容）
- * 控制消息路由：meta → Receiver 初始化 + UI；part_reset → Sender 整
- * part 重传；file_done → UI 导出流程。
+ * 控制消息路由：meta → Receiver 初始化 + UI + resume_manifest 握手；
+ * resume_manifest → Sender 只补缺失块；part_reset → 整 part 重传；
+ * file_done → UI 导出流程。
+ *
+ * T06 续传（SPEC §3.4）：
+ * - 发送端：startSend 发 meta 后等 resume_manifest（gate）→ 只发缺失 64MiB 块；
+ *   同 sessionId 重连（resumeSend）→ 接收端内存态/持久化位图决定补发集合。
+ * - 接收端：位图随块完成更新，经 onResumeChange 节流（≤2s）持久化到 ResumeStore
+ *   （IndexedDB），接收端为权威。
  */
 
 import { parseChunk, parseControl, encodeControl } from './framing'
@@ -16,7 +23,13 @@ import { sha256Hex } from '../storage/engine'
 import { PART_SIZE } from '../webrtc/transferMeta'
 import type { PartSink } from './receiver'
 import type { ChunkTransport, FileSource } from './sender'
-import type { FileMeta, MetaMessage, TransferControlMessage } from '../protocol/transfer'
+import type {
+  FileMeta,
+  MetaMessage,
+  ResumeFileState,
+  TransferControlMessage,
+} from '../protocol/transfer'
+import type { FileManifest, SessionManifest } from '../storage/sessionStore'
 
 export interface ControllerEvents {
   onMeta(files: FileMeta[], sessionId: string): void
@@ -24,25 +37,56 @@ export interface ControllerEvents {
   onRecvProgress(fileId: number, partIndex: number, received: number, total: number): void
   onFileDone(fileId: number): void
   onError(reason: string): void
+  /** 同名同大小文件与已收清单不一致（被改过）→ 该文件重新接收 */
+  onResumeMismatch?(fileName: string): void
+  /** 发送端某 part 完成（进度缓存用，可选） */
+  onPartDone?(fileId: number, partIndex: number): void
 }
+
+/** 接收端权威状态的持久化抽象（SessionStore 满足该结构） */
+export interface ResumeStore {
+  get(sessionId: string): Promise<SessionManifest | undefined>
+  list(): Promise<SessionManifest[]>
+  upsert(record: SessionManifest): Promise<void>
+}
+
+/** 位图节流持久化间隔（SPEC §3.4：崩溃最多重传 64MiB + 在途） */
+export const RESUME_SAVE_MS = 2000
+/** 等 resume_manifest 的超时（老接收端不响应时兜底全发） */
+const RESUME_GATE_TIMEOUT_MS = 10_000
 
 export class TransferController {
   private readonly receiver: Receiver
   private readonly transport: ChunkTransport
   private readonly events: ControllerEvents
+  private readonly resumeStore?: ResumeStore
   private sender: Sender | null = null
-  private lastSend: { files: { id: number; name: string; size: number; source: FileSource }[]; signal?: AbortSignal } | null = null
+  private lastSend: {
+    files: { id: number; name: string; size: number; source: FileSource }[]
+    signal?: AbortSignal
+    sessionId: string
+  } | null = null
+  /** 接收端权威记录（内存影子，节流写 ResumeStore） */
+  private record: SessionManifest | null = null
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private recordDirty = false
+  /** resume_manifest 到达时解除 startSend 的 gate */
+  private resumeWait: { resolve: (plan: ResumeFileState[] | null) => void } | null = null
+  private pendingResume: ResumeFileState[] | null = null
 
-  constructor(sink: PartSink, transport: ChunkTransport, events: ControllerEvents) {
+  constructor(sink: PartSink, transport: ChunkTransport, events: ControllerEvents, resumeStore?: ResumeStore) {
     this.transport = transport
     this.events = events
+    this.resumeStore = resumeStore
     this.receiver = new Receiver(
       sink,
       (msg) => this.sendControl(msg),
       {
         onProgress: (f, p, r, t) => this.events.onRecvProgress(f, p, r, t),
         onFileDone: (f) => this.events.onFileDone(f),
+        onResumeMismatch: (n) => this.events.onResumeMismatch?.(n),
       },
+      (fileId, partIndex, done, bitfield) => this.onResumeChange(fileId, partIndex, done, bitfield),
     )
   }
 
@@ -62,35 +106,147 @@ export class TransferController {
     if (control) this.handleControl(control as TransferControlMessage)
   }
 
-  /** 发送端：选文件后启动传输（先计算 part SHA-256，meta 先行，再顺序发 chunk） */
+  /**
+   * 发送端：选文件后启动传输（meta 先行 → 等 resume_manifest → 只补缺失块）。
+   * sessionId 可复用（重连续传场景：resumeSend 传入原 sessionId，接收端内存态命中）。
+   */
   async startSend(
     files: { id: number; name: string; size: number; source: FileSource }[],
     signal?: AbortSignal,
+    sessionId?: string,
   ): Promise<void> {
-    const meta = await this.buildMeta(files, signal)
+    const meta = await this.buildMeta(files, signal, sessionId)
     this.sendControl(meta)
     const sender = new Sender(
       this.transport,
       {
-        onPartDone: () => {
-          /* 发送进度由 onProgress 体现；接收端确认走控制消息 */
-        },
+        onPartDone: (fileId, partIndex) => this.events.onPartDone?.(fileId, partIndex),
         onFileDone: (fileId) => this.events.onFileDone(fileId),
         onProgress: (f, c, t) => this.events.onProgress(f, c, t),
       },
     )
     this.sender = sender
-    this.lastSend = { files, signal }
-    return sender.send(
+    this.lastSend = { files, signal, sessionId: meta.sessionId }
+    const resume = this.pendingResume ?? await this.waitForResume()
+    this.pendingResume = null
+    await sender.send(
       files.map((f) => ({ id: f.id, size: f.size, source: f.source })),
+      resume ?? undefined,
       signal,
     )
+    this.sender = null // 发送结束：之后到达的 part_reset 走「重启整批」分支
+  }
+
+  /** DataChannel 重连成功后自动续传：同 sessionId 重发 meta → resume 握手 → 只补缺失 */
+  async resumeSend(signal?: AbortSignal): Promise<void> {
+    if (!this.lastSend) return
+    // 上次的 signal 若已中止（断连时取消过）不能复用；调用方可传新信号接管取消
+    const useSignal =
+      signal ?? (this.lastSend.signal && !this.lastSend.signal.aborted ? this.lastSend.signal : undefined)
+    await this.startSend(this.lastSend.files, useSignal, this.lastSend.sessionId)
+  }
+
+  /** 立即落盘未完成的位图（pagehide 等时机调用） */
+  async flushResume(): Promise<void> {
+    await this.flushSave()
+  }
+
+  private async handleMeta(msg: MetaMessage): Promise<void> {
+    const stored = this.resumeStore ? await this.loadStored(msg) : undefined
+    this.receiver.onMeta(msg, stored)
+    this.events.onMeta(msg.files, msg.sessionId)
+    this.initRecord(msg, stored)
+  }
+
+  private async loadStored(msg: MetaMessage): Promise<FileManifest[] | undefined> {
+    const bySession = await this.resumeStore!.get(msg.sessionId)
+    if (bySession) return bySession.files
+    // 发送端重载（新 sessionId）：按「文件 name+size 集合」匹配已收会话
+    const wanted = this.fileKey(msg.files)
+    for (const record of await this.resumeStore!.list()) {
+      if (record.files.length === msg.files.length && this.fileKey(record.files) === wanted) {
+        return record.files
+      }
+    }
+    return undefined
+  }
+
+  private fileKey(files: Array<{ name: string; size: number }>): string {
+    return files.map((f) => `${f.name}:${f.size}`).sort().join('|')
+  }
+
+  /** 接收端：初始化权威记录（沿用 stored 中 sha256 匹配的 part 状态） */
+  private initRecord(msg: MetaMessage, stored?: FileManifest[]): void {
+    if (!this.resumeStore) return
+    this.record = {
+      sessionId: msg.sessionId,
+      createdAt: Date.now(),
+      lastActiveAt: Date.now(),
+      files: msg.files.map((f) => {
+        const sf = stored?.find((s) => s.name === f.name && s.size === f.size)
+        const parts = f.parts.map((p) => {
+          const sp = sf?.parts?.find((x) => x.index === p.index)
+          const usable = sp !== undefined && sp.sha256 === p.sha256
+          return usable
+            ? { index: p.index, state: sp.state, bitfield: sp.bitfield, sha256: sp.sha256 }
+            : { index: p.index, state: 'partial' as const, bitfield: '', sha256: p.sha256 }
+        })
+        return { fileId: f.id, name: f.name, size: f.size, partCount: f.parts.length, parts }
+      }),
+    }
+    this.recordDirty = true
+    this.scheduleSave()
+  }
+
+  private onResumeChange(fileId: number, partIndex: number, done: boolean, bitfield: string): void {
+    if (!this.record) return
+    const file = this.record.files.find((f) => f.fileId === fileId)
+    const part = file?.parts?.find((p) => p.index === partIndex)
+    if (!file || !part) return
+    part.state = done ? 'done' : 'partial'
+    part.bitfield = done ? '' : bitfield
+    this.recordDirty = true
+    this.scheduleSave()
+  }
+
+  private scheduleSave(): void {
+    if (!this.resumeStore || this.saveTimer) return
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null
+      void this.flushSave()
+    }, RESUME_SAVE_MS)
+  }
+
+  private async flushSave(): Promise<void> {
+    if (!this.resumeStore || !this.record || !this.recordDirty) return
+    this.recordDirty = false
+    this.record.lastActiveAt = Date.now()
+    try {
+      await this.resumeStore.upsert(this.record)
+    } catch {
+      /* 尽力而为：持久化失败不阻断传输 */
+    }
+  }
+
+  private waitForResume(): Promise<ResumeFileState[] | null> {
+    return new Promise((resolve) => {
+      const waiter = {
+        resolve: (plan: ResumeFileState[] | null) => {
+          clearTimeout(timer)
+          if (this.resumeWait === waiter) this.resumeWait = null
+          resolve(plan)
+        },
+      }
+      const timer = setTimeout(() => waiter.resolve(null), RESUME_GATE_TIMEOUT_MS)
+      this.resumeWait = waiter
+    })
   }
 
   /** 组 meta：512MiB 切分 + 每个 part 的整体 SHA-256（SPEC §3.4 元数据先行） */
   private async buildMeta(
     files: { id: number; name: string; size: number; source: FileSource }[],
     signal?: AbortSignal,
+    sessionId: string = crypto.randomUUID(),
   ): Promise<MetaMessage> {
     const fileMetas: FileMeta[] = []
     for (const f of files) {
@@ -105,7 +261,7 @@ export class TransferController {
       }
       fileMetas.push({ id: f.id, name: f.name, size: f.size, parts: partsWithHash })
     }
-    return { type: 'meta', sessionId: crypto.randomUUID(), files: fileMetas }
+    return { type: 'meta', sessionId, files: fileMetas }
   }
 
   private handleControlJson(raw: string): void {
@@ -121,8 +277,9 @@ export class TransferController {
   private handleControl(msg: TransferControlMessage): void {
     switch (msg.type) {
       case 'meta':
-        this.receiver.onMeta(msg)
-        this.events.onMeta(msg.files, msg.sessionId)
+        void this.handleMeta(msg).catch((e) =>
+          this.events.onError(e instanceof Error ? e.message : String(e)),
+        )
         break
       case 'part_done':
         break // 发送端进度确认（v1 仅 UI 可忽略；file_done 为完成信号）
@@ -133,8 +290,16 @@ export class TransferController {
         if (this.sender) {
           this.sender.requestReset(msg.fileId, msg.partIndex)
         } else if (this.lastSend) {
-          // sender 已结束（发送完成）后才收到重置请求：重启整批（meta 重发，Receiver 幂等）
-          void this.startSend(this.lastSend.files, this.lastSend.signal)
+          // sender 已结束（发送完成）后才收到重置请求：重启整批（同 sessionId 重握手）
+          void this.startSend(this.lastSend.files, this.lastSend.signal, this.lastSend.sessionId)
+        }
+        break
+      case 'resume_manifest':
+        if (this.resumeWait) {
+          this.resumeWait.resolve(msg.files)
+          this.resumeWait = null
+        } else {
+          this.pendingResume = msg.files
         }
         break
     }

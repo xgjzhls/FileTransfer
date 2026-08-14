@@ -8,6 +8,8 @@
 
 import { encodeChunk } from './framing'
 import { PART_SIZE, planParts } from '../webrtc/transferMeta'
+import { blocksInPart, blockChunkRange, decodeBitfield } from './bitfield'
+import type { ResumeFileState } from '../protocol/transfer'
 
 export const CHUNK_SIZE = 256 * 1024 - 64 // 256KiB 留帧头余量（13B 头 + payload ≤ maxMessageSize 262144）
 export const BACKPRESSURE_LIMIT = 8 * 1024 * 1024 // SPEC §3.1: >8MiB 暂停
@@ -49,47 +51,81 @@ export class Sender {
     this.resets.add(`${fileId}:${partIndex}`)
   }
 
-  async send(files: { id: number; size: number; source: FileSource }[], signal?: AbortSignal): Promise<void> {
+  async send(
+    files: { id: number; size: number; source: FileSource }[],
+    resume?: ResumeFileState[],
+    signal?: AbortSignal,
+  ): Promise<void> {
     for (const file of files) {
-      await this.sendFile(file, signal)
+      const resumeFile = resume?.find((r) => r.id === file.id)
+      await this.sendFile(file, resumeFile, signal)
     }
   }
 
   private async sendFile(
     file: { id: number; size: number; source: FileSource },
+    resumeFile: ResumeFileState | undefined,
     signal?: AbortSignal,
   ): Promise<void> {
     const parts = planParts(file.size, PART_SIZE)
     for (const part of parts) {
       if (signal?.aborted) return
-      await this.sendPart(file, part.index, part.size, signal)
+      const resumePart = resumeFile?.parts.find((p) => p.index === part.index)
+      const chunks = this.scheduleChunks(part.size, resumePart)
+      if (chunks.length > 0) {
+        await this.sendPart(file, part.index, part.size, chunks, signal)
+      }
       this.events.onPartDone(file.id, part.index)
     }
     this.events.onFileDone(file.id)
+  }
+
+  /** 本 run 要发送的 chunk 序列：done 跳过；partial 只取缺失块（块内整发）；无记录全发 */
+  private scheduleChunks(
+    partSize: number,
+    resumePart?: { state: string; bitfield: string },
+  ): number[] {
+    const chunkCount = Math.max(1, Math.ceil(partSize / this.chunkSize))
+    if (resumePart?.state === 'done') return []
+    if (!resumePart) return range(chunkCount)
+    const complete = decodeBitfield(resumePart.bitfield, blocksInPart(partSize, this.chunkSize))
+    const chunks: number[] = []
+    for (let b = 0; b < complete.length; b++) {
+      if (complete[b]) continue
+      const { start, end } = blockChunkRange(b, chunkCount)
+      for (let c = start; c < end; c++) chunks.push(c)
+    }
+    return chunks
   }
 
   private async sendPart(
     file: { id: number; size: number; source: FileSource },
     partIndex: number,
     partSize: number,
+    chunks: number[],
     signal?: AbortSignal,
   ): Promise<void> {
     const chunkCount = Math.max(1, Math.ceil(partSize / this.chunkSize))
     const partStart = partIndex * PART_SIZE
     const resetKey = `${file.id}:${partIndex}`
-    for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+    let i = 0
+    while (i < chunks.length) {
       if (signal?.aborted) return
       if (this.resets.has(resetKey)) {
+        // part_reset（接收端清位图）→ 整 part 从头重发
         this.resets.delete(resetKey)
-        chunkIndex = -1 // 整 part 从头重发
+        chunks = range(chunkCount)
+        i = 0
         continue
       }
+      const chunkIndex = chunks[i]
       const start = partStart + chunkIndex * this.chunkSize
       const end = Math.min(start + this.chunkSize, partStart + partSize)
       const payload = await file.source.slice(start, end)
       const frame = encodeChunk(file.id, partIndex, chunkIndex, payload)
       await this.pump(frame)
-      this.events.onProgress(file.id, chunkIndex + 1, chunkCount)
+      this.events.onProgress(file.id, i + 1, chunks.length)
+      i++
     }
   }
 
@@ -113,4 +149,8 @@ function waitForLow(transport: ChunkTransport): Promise<void> {
     }
     const cancel = transport.onBufferedAmountLow(finish)
   })
+}
+
+function range(n: number): number[] {
+  return Array.from({ length: n }, (_, i) => i)
 }

@@ -146,6 +146,42 @@ try {
     step('（降级）WebRTC connected + 传输断言跳过', true, '环境不支持同机 ICE')
   }
 
+  // ── 5.5 T06：传输中途杀接收端页面 → 自动恢复 → 文件完整（续传）
+  if (webrtcOk) {
+    const srcResume = join(dir, 'e2e-resume.bin')
+    writeFileSync(srcResume, randomBytes(20 * 1024 * 1024)) // 20 MiB（给中断留时间）
+    await pageA.setInputFiles('input[type="file"]', srcResume)
+    await pageA.getByRole('button', { name: '开始发送' }).click()
+    // 等 B 出现接收进度，再等一个节流周期（2s）确保位图已落盘 IndexedDB
+    await pageB.waitForFunction(() => /chunk/.test(document.body.textContent ?? ''), null, {
+      timeout: 30000,
+    })
+    await pageB.waitForTimeout(2500)
+    // 杀 B：重载页面（内存态丢失，IndexedDB manifest 保留）→ 重新入房
+    await pageB.reload()
+    await pageB.getByPlaceholder('输入房间码加入').fill(room)
+    await pageB.getByRole('button', { name: '加入' }).click()
+    await pageB.locator('.badge', { hasText: '房间码：' }).waitFor({ timeout: 20000 })
+    // A 的对端换成新 device id（peer_left + peer_joined）；等 A 的「连接」按钮可点
+    await pageA.waitForFunction(
+      () => {
+        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === '连接')
+        return btn !== undefined && !btn.disabled
+      },
+      null,
+      { timeout: 20000 },
+    )
+    await pageA.getByRole('button', { name: '连接' }).click()
+    await waitStatus(pageA, 'connected')
+    // A 连接恢复 → 自动 resumeSend（同 sessionId）→ B 从断点继续直到完成
+    await pageB.waitForFunction(() => document.body.textContent?.includes('导出'), null, {
+      timeout: 120000,
+    })
+    step('T06 断连续传：杀接收端页面后自动恢复，文件完整（B 显示导出）', true, '20 MiB')
+  } else {
+    step('（降级）T06 断连续传断言跳过', true, '环境不支持同机 ICE')
+  }
+
   // ── 6. 杀 WS → 自动重连 → 房间码/设备列表恢复（T09 + T10）
   // T09：A 的 WS 被外力断开 → 指数退避自动重连 + 重新 join 原房间。
   // T10：miniflare 在 close + 新 fetch 时重建 DO 实例（近似 evict）——B 的

@@ -8,8 +8,8 @@
 
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
-- 分支：`main`（T09/T10 已提交）；`prototype/storage-spike`（只读参考，勿动）
-- **T01-T05 代码全部完成，T09（WS 自动重连）+ T10（DO presence 持久化）代码完成**（15 新单测 + e2e 10/10 绿）；**下一步 T06 续传**（前置 T09/T10 已就绪）
+- 分支：`main`（T09/T10/T06 已提交）；`prototype/storage-spike`（只读参考，勿动）
+- **T01-T05 代码全部完成，T09/T10/T06 代码完成**（178 单测 + e2e 11/11 绿）；**下一步 T07（离线二维码续传）或 T08（收尾）**
 
 ## 已有产物
 | 路径 | 内容 |
@@ -25,11 +25,11 @@
 | `docs/` | Pages 构建产物（main 分支 /docs，用户已设 Pages 源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ **T10 ✅**）
-- **下一步：T06 续传**（bitfield 粒度 64MiB + resume_manifest + 自动重连；前置 T09 WS 重连 ✅、T10 presence ✅）
-- 依赖图：T03 → T04 → T05 → T06；T04 ← T07；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
-- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 真机断网恢复与线上 evict —— 桌面 e2e 已全绿，真机未验
-- `npm test` 148/148 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）10/10 绿（含 T09/T10 杀 WS→重连→presence 恢复）；本地 smoke `NODE_TLS_REJECT_UNAUTHORIZED=0 node server/smoke.mjs https://localhost:8787` 8/8
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ **T06 ✅**）
+- **下一步：T07（离线二维码续传，复用 T06 的 resume 握手）或 T08（收尾：照片门控/批量 UI/Wake Lock/多端真机联调）**
+- 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
+- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、**T06 e2e 断连续传用例（需真 WebRTC 环境）** —— 桌面 e2e 已全绿（本机 Clash fake-ip 降级模式），真机未验
+- `npm test` 178/178 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）11/11 绿
 
 ## 本地测试环境（全本地，绕开 Cloudflare 网络问题）——关键
 用户网络：DNS 被 Clash fake-ip 劫持（198.18.x.x），不开系统代理/TUN 无法直连 Cloudflare；**开发测试一律走本地信令**：
@@ -53,7 +53,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - 证书 SAN：192.168.10.26 + 10.213.80.3 + 198.18.0.1 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/README.md`）
 
 ## 测试与验证
-- 单测：`npm test`（Vitest，148 个，含 storage/webrtc/transfer/signaling/server）
+- 单测：`npm test`（Vitest，178 个，含 storage/webrtc/transfer/signaling/server）
 - **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→无 JS 错；WebRTC 环境自动探测降级）
   - e2e 默认走代理 `http://127.0.0.1:7890`（Clash），**Clash 退出后必须 E2E_NO_PROXY=1**
   - headless chromium 需 WebRTC 参数（脚本内置）：`--disable-features=WebRtcHideLocalIpsWithMdns --force-webrtc-ip-handling-policy=default_public_and_private_interfaces --allow-loopback-ice`
@@ -69,6 +69,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - **Playwright/macOS 13**：本机为 macOS 13.7，Playwright 已**降级到 1.57.0**（1.58+ 的 chromium 不再提供 mac13 构建，`playwright install` 报 "does not support chromium on mac13"）；勿盲目升级
 - **`context.setOffline(true)` 只阻断新连接，不会关闭已建立的 WS**（e2e 杀 WS 用 `window.__ltSignaling.forceDisconnect()` 测试钩子，仅 DEV 构建暴露）
 - **信令 WS URL 带 `?device=<uuid>`（T10）**：服务端 `acceptWebSocket` 用它打 Hibernation tag（evict 后重建 presence）；老客户端不带也能用（无 tag → 不跨 evict 恢复）。消息格式（SPEC §5.2）未动
+- **续传（T06）**：64MiB 位图（256 帧/块）在接收端，节流 ≤2s 写 IndexedDB；发送端 meta 后等 resume_manifest 再发（只补缺失块）；DataChannel 断开自动重建并续传；「设置」页可删未完成会话。注意 e2e 断连续传用例需真 WebRTC（本机 Clash fake-ip 无同机 ICE 会降级跳过）
 - 照片门控 <300MiB（`PHOTO_GATE_BYTES`）；导出有「下载到本机」（Blob，>2GB 慎用）与「导出（分享）」
 - 孤儿数据：启动扫描 + 设置页清理（T02 已实现）
 

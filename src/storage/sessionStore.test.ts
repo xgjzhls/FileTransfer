@@ -54,4 +54,33 @@ describe('SessionStore — IndexedDB 会话 manifest', () => {
     await store.clear()
     expect(await store.list()).toEqual([])
   })
+
+  it('T06：files[].parts（续传位图 + sha256）随记录存取往返', async () => {
+    const store = setup()
+    const withParts = {
+      ...RECORD,
+      files: [
+        {
+          fileId: 0,
+          name: 'a.mov',
+          size: 100,
+          partCount: 2,
+          parts: [
+            { index: 0, state: 'done' as const, bitfield: '', sha256: 'S0' },
+            { index: 1, state: 'partial' as const, bitfield: 'AA==', sha256: 'S1' },
+          ],
+        },
+      ],
+    }
+    await store.upsert(withParts)
+    const loaded = await store.get('sess-1')
+    expect(loaded?.files[0].parts).toEqual(withParts.files[0].parts)
+  })
+
+  it('T06：旧记录无 parts 字段（兼容 undefined = 全缺）', async () => {
+    const store = setup()
+    await store.upsert(RECORD)
+    const loaded = await store.get('sess-1')
+    expect(loaded?.files[0].parts).toBeUndefined()
+  })
 })

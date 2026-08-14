@@ -1,16 +1,28 @@
 /**
- * SessionStore —— 会话 manifest 的 IndexedDB 持久化（T02 最小版）。
+ * SessionStore —— 会话 manifest 的 IndexedDB 持久化（T02 最小版 + T06 续传状态）。
  *
- * T02 只记录会话/文件元数据与时间戳（孤儿判定依据）；
- * bitfield 等续传状态属 T06 扩展本 store 的 files[].parts。
- * IndexedDB 可注入（测试用 fake-indexeddb；生产用浏览器全局）。
+ * T06 扩展：files[].parts 记录每 part 的续传状态（done / partial + bitfield，
+ * 64MiB 粒度）与期望 SHA-256；接收端为权威，节流写入由调用方（TransferController）
+ * 控制（SPEC §3.4 节流 ≤2s）。IndexedDB 可注入（测试用 fake-indexeddb；生产用浏览器全局）。
  */
+
+/** 单个 part 的持久化续传状态（会话 manifest 用；字段多于协议 resume_manifest） */
+export interface StoredPartState {
+  index: number
+  state: 'done' | 'partial'
+  /** base64 位图（64MiB 粒度）；done 的 part 为空 */
+  bitfield: string
+  /** meta 时的期望 SHA-256：恢复时对比新 meta 检测文件是否被改 */
+  sha256: string
+}
 
 export interface FileManifest {
   fileId: number
   name: string
   size: number
   partCount: number
+  /** T06：每 part 续传状态（旧记录无此字段 = 视为全缺） */
+  parts?: StoredPartState[]
 }
 
 export interface SessionManifest {

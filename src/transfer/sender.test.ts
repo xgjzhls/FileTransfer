@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { BACKPRESSURE_LIMIT, CHUNK_SIZE, Sender } from './sender'
 import { parseChunk } from './framing'
+import { encodeBitfield } from './bitfield'
 import type { FileSource } from './sender'
+import type { ResumeFileState } from '../protocol/transfer'
 
 const PART = 512 * 1024 * 1024
 
@@ -139,6 +141,99 @@ describe('Sender — 背压（SPEC §3.1: bufferedAmount > 8MiB 暂停）', () =
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('Sender — 续传调度（T06：done 跳过 / partial 只补缺失块）', () => {
+  const C = 64 // 自定义小 chunk：块数公式与默认一致（256 帧/块）
+
+  function setupChunked() {
+    const transport = new FakeTransport()
+    const events = {
+      onPartDone: vi.fn(),
+      onFileDone: vi.fn(),
+      onProgress: vi.fn(),
+    }
+    const sender = new Sender(transport, events, C)
+    return { transport, events, sender }
+  }
+
+  const sourceOf = (bytes: Uint8Array): FileSource => ({
+    name: 'f',
+    size: bytes.length,
+    slice: async (s, e) => bytes.subarray(s, e),
+  })
+
+  it('done part 完全跳过：不发任何 chunk，仍触发 onPartDone', async () => {
+    const { transport, events, sender } = setupChunked()
+    const bytes = new Uint8Array(C * 300)
+    await sender.send([{ id: 0, size: bytes.length, source: sourceOf(bytes) }], [
+      { id: 0, parts: [{ index: 0, state: 'done', bitfield: '' }] },
+    ])
+    expect(transport.sent).toHaveLength(0)
+    expect(events.onPartDone).toHaveBeenCalledWith(0, 0)
+    expect(events.onFileDone).toHaveBeenCalledWith(0)
+  })
+
+  it('partial：只发缺失块的 chunk（块内整发，按 chunk 顺序）', async () => {
+    const { transport, events, sender } = setupChunked()
+    const bytes = new Uint8Array(C * 300) // 300 chunk = 2 块（块0=[0,256) 块1=[256,300)）
+    // 块 0 完整 → 只发块 1 的 44 个 chunk（256..299）
+    const resume: ResumeFileState[] = [
+      { id: 0, parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2) }] },
+    ]
+    await sender.send([{ id: 0, size: bytes.length, source: sourceOf(bytes) }], resume)
+    const chunks = transport.sent.map((f) => parseChunk(f)!.chunkIndex)
+    expect(chunks).toHaveLength(44)
+    expect(chunks[0]).toBe(256)
+    expect(chunks.at(-1)).toBe(299)
+    expect(events.onProgress).toHaveBeenLastCalledWith(0, 44, 44)
+  })
+
+  it('混合：part0 done + part1 partial + part2 无记录（全发）', async () => {
+    const { transport, sender } = setupChunked()
+    const bytes = new Uint8Array(C * 300)
+    const file = (id: number): { id: number; size: number; source: FileSource } => ({
+      id,
+      size: bytes.length,
+      source: sourceOf(bytes),
+    })
+    // 文件 0：part0 done；文件 1：无记录 → 全发
+    const resume: ResumeFileState[] = [
+      { id: 0, parts: [{ index: 0, state: 'done', bitfield: '' }] },
+    ]
+    await sender.send([file(0), file(1)], resume)
+    const byFile = new Map<number, number[]>()
+    for (const f of transport.sent) {
+      const c = parseChunk(f)!
+      byFile.set(c.fileId, [...(byFile.get(c.fileId) ?? []), c.chunkIndex])
+    }
+    expect(byFile.get(0)).toBeUndefined() // 文件 0 跳过
+    expect(byFile.get(1)!.length).toBe(300) // 文件 1 全发
+  })
+
+  it('partial 发送中收到 part_reset → 整 part 重发（清位图等价）', async () => {
+    const { transport, sender } = setupChunked()
+    const bytes = new Uint8Array(C * 300)
+    const source = sourceOf(bytes)
+    const orig = source.slice
+    let first = true
+    source.slice = async (s: number, e: number) => {
+      if (first) {
+        first = false
+        sender.requestReset(0, 0)
+      }
+      return orig(s, e)
+    }
+    await sender.send([{ id: 0, size: bytes.length, source }], [
+      { id: 0, parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2) }] },
+    ])
+    const chunks = transport.sent.map((f) => parseChunk(f)!.chunkIndex)
+    // chunk 256 发出后 reset 到达 → 从头重发全部 300：sent = [256, 0..299]
+    expect(chunks).toHaveLength(301)
+    expect(chunks[0]).toBe(256)
+    expect(chunks[1]).toBe(0)
+    expect(chunks.at(-1)).toBe(299)
   })
 })
 

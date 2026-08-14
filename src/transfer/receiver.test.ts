@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Receiver } from './receiver'
 import { CHUNK_SIZE } from './sender'
-import type { MetaMessage, PartDoneMessage } from '../protocol/transfer'
+import { CHUNKS_PER_BLOCK, encodeBitfield } from './bitfield'
+import type { FileManifest } from '../storage/sessionStore'
+import type { MetaMessage, PartDoneMessage, ResumeManifestMessage } from '../protocol/transfer'
 
 const META: MetaMessage = {
   type: 'meta',
@@ -125,3 +127,175 @@ describe('Receiver — chunk 落盘与 part 完成（SPEC §3.4）', () => {
     expect(fileDone).toEqual([0]) // 本地 UI 立即知道完成
   })
 })
+
+describe('Receiver — 续传位图（T06）', () => {
+  /** 300 chunk 的 part（2 块：块0=[0,256) 块1=[256,300)） */
+  const RESUME_META: MetaMessage = {
+    type: 'meta',
+    sessionId: 'sess',
+    files: [
+      {
+        id: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        parts: [{ index: 0, size: CHUNK_SIZE * 300, sha256: 'E' }],
+      },
+    ],
+  }
+
+  function resumeSetup() {
+    const sink = new FakeSink()
+    const controls: unknown[] = []
+    const resumeChanges: Array<[number, number, boolean, string]> = []
+    const receiver = new Receiver(
+      sink,
+      (m) => controls.push(m),
+      { onProgress: () => {}, onFileDone: () => {} },
+      (f, p, done, bitfield) => resumeChanges.push([f, p, done, bitfield]),
+    )
+    return { sink, receiver, controls, resumeChanges }
+  }
+
+  it('meta 立即回应 resume_manifest：全部 partial 空位图（新传输）', () => {
+    const { receiver, controls } = resumeSetup()
+    receiver.onMeta(RESUME_META)
+    const manifest = controls.find((c) => (c as ResumeManifestMessage).type === 'resume_manifest') as ResumeManifestMessage
+    expect(manifest.files).toEqual([
+      { id: 0, parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([], 2) }] },
+    ])
+  })
+
+  it('收满一个续传块 → onResumeChange 上报位图（仅该块置位）', async () => {
+    const { receiver, resumeChanges } = resumeSetup()
+    receiver.onMeta(RESUME_META)
+    for (let c = 0; c < CHUNKS_PER_BLOCK; c++) {
+      await receiver.onChunk(0, 0, c, new Uint8Array(CHUNK_SIZE))
+    }
+    const last = resumeChanges.at(-1)!
+    expect(last[0]).toBe(0) // fileId
+    expect(last[1]).toBe(0) // partIndex
+    expect(last[2]).toBe(false) // 未 done
+    expect(decodeLocal(last[3], 2)).toEqual([true, false])
+  })
+
+  it('续传恢复：stored 记录（partial 位图）→ 初始化完整块并回应对应 resume_manifest', async () => {
+    const stored: FileManifest[] = [
+      {
+        fileId: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        partCount: 1,
+        parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2), sha256: 'E' }],
+      },
+    ]
+    const { sink, receiver, controls } = resumeSetup()
+    receiver.onMeta(RESUME_META, stored)
+    const manifest = controls.find((c) => (c as ResumeManifestMessage).type === 'resume_manifest') as ResumeManifestMessage
+    expect(manifest.files[0].parts[0].state).toBe('partial')
+    expect(decodeLocal(manifest.files[0].parts[0].bitfield, 2)).toEqual([true, false])
+
+    // 完整块（块 0）的 chunk 重复到达（防御）：幂等不重写；缺的块 1 正常写
+    await receiver.onChunk(0, 0, 0, new Uint8Array(1))
+    expect(sink.writeChunk).not.toHaveBeenCalled()
+    await receiver.onChunk(0, 0, 256, new Uint8Array(CHUNK_SIZE))
+    expect(sink.writeChunk).toHaveBeenCalledTimes(1)
+    expect(sink.writeChunk.mock.calls[0][1]).toBe(256 * CHUNK_SIZE)
+  })
+
+  it('done part 的 stored 记录：resume_manifest 标 done，chunk 到达被忽略', async () => {
+    const stored: FileManifest[] = [
+      {
+        fileId: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        partCount: 1,
+        parts: [{ index: 0, state: 'done', bitfield: '', sha256: 'E' }],
+      },
+    ]
+    const { sink, receiver, controls } = resumeSetup()
+    receiver.onMeta(RESUME_META, stored)
+    const manifest = controls.find((c) => (c as ResumeManifestMessage).type === 'resume_manifest') as ResumeManifestMessage
+    expect(manifest.files[0].parts[0].state).toBe('done')
+    await receiver.onChunk(0, 0, 0, new Uint8Array(1))
+    expect(sink.writeChunk).not.toHaveBeenCalled()
+  })
+
+  it('sha256 不匹配（文件被改）：该文件不续传，触发 onResumeMismatch', () => {
+    const stored: FileManifest[] = [
+      {
+        fileId: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        partCount: 1,
+        parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2), sha256: 'OLD-SHA' }],
+      },
+    ]
+    const mismatch: string[] = []
+    const sink = new FakeSink()
+    const receiver = new Receiver(sink, () => {}, {
+      onProgress: () => {},
+      onFileDone: () => {},
+      onResumeMismatch: (n) => mismatch.push(n),
+    })
+    receiver.onMeta(RESUME_META, stored)
+    expect(mismatch).toEqual(['big.bin'])
+  })
+
+  it('同 sessionId 重连：内存态优先（不回退到持久化记录）', async () => {
+    const { receiver, resumeChanges, sink } = resumeSetup()
+    receiver.onMeta(RESUME_META)
+    // 收块 0
+    for (let c = 0; c < CHUNKS_PER_BLOCK; c++) await receiver.onChunk(0, 0, c, new Uint8Array(CHUNK_SIZE))
+    const writesAfterFirstRun = sink.writeChunk.mock.calls.length
+    // 同 sessionId 重连（stored 为空记录——不应回退）
+    const stale: FileManifest[] = [
+      {
+        fileId: 0,
+        name: 'big.bin',
+        size: CHUNK_SIZE * 300,
+        partCount: 1,
+        parts: [{ index: 0, state: 'partial', bitfield: '', sha256: 'E' }],
+      },
+    ]
+    receiver.onMeta(RESUME_META, stale)
+    // 内存态保留：块 0 已完整，再收块 0 的 chunk 不重写
+    await receiver.onChunk(0, 0, 0, new Uint8Array(1))
+    expect(sink.writeChunk.mock.calls.length).toBe(writesAfterFirstRun)
+    void resumeChanges
+  })
+
+  it('校验失败：清空位图 + part_reset + onResumeChange(done=false, 空位图)', async () => {
+    let fail = true
+    const finalize = vi.fn(async () => {
+      const ok = !fail
+      fail = false
+      return { ok, actual: 'WRONG' }
+    })
+    const sink = new FakeSink()
+    sink.finalizePart = finalize
+    const controls: unknown[] = []
+    const resumeChanges: Array<[number, number, boolean, string]> = []
+    const receiver = new Receiver(
+      sink,
+      (m) => controls.push(m),
+      { onProgress: () => {}, onFileDone: () => {} },
+      (f, p, done, bitfield) => resumeChanges.push([f, p, done, bitfield]),
+    )
+    receiver.onMeta(RESUME_META)
+    // 收满块 0 → 位图 [1,0]
+    for (let c = 0; c < CHUNKS_PER_BLOCK; c++) await receiver.onChunk(0, 0, c, new Uint8Array(CHUNK_SIZE))
+    expect(decodeLocal(resumeChanges.at(-1)![3], 2)).toEqual([true, false])
+    // 收满全部 → finalize 失败 → 清位图
+    for (let c = CHUNKS_PER_BLOCK; c < 300; c++) await receiver.onChunk(0, 0, c, new Uint8Array(CHUNK_SIZE))
+    expect(controls).toContainEqual({ type: 'part_reset', fileId: 0, partIndex: 0 })
+    expect(resumeChanges.at(-1)![2]).toBe(false)
+    expect(decodeLocal(resumeChanges.at(-1)![3], 2)).toEqual([false, false])
+    void controls
+  })
+})
+
+/** 测试辅助：解码 base64 位图 */
+function decodeLocal(b64: string, blockCount: number): boolean[] {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+  return Array.from({ length: blockCount }, (_, b) => (bytes[b >> 3] & (1 << (b & 7))) !== 0)
+}

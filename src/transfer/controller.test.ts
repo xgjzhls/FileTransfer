@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import { TransferController } from './controller'
+import type { ResumeStore } from './controller'
 import { encodeChunk, encodeControl, parseChunk, parseControl } from './framing'
-import { CHUNK_SIZE } from './sender'
+import { BACKPRESSURE_LIMIT, CHUNK_SIZE } from './sender'
+import { CHUNKS_PER_BLOCK } from './bitfield'
+import { sha256Hex } from '../storage/engine'
 import type { PartSink } from './receiver'
 import type { FileSource } from './sender'
-import type { MetaMessage } from '../protocol/transfer'
+import type { MetaMessage, ResumeFileState, ResumeManifestMessage, TransferControlMessage } from '../protocol/transfer'
+import type { SessionManifest } from '../storage/sessionStore'
+
+// ── 基础 fake（旧式单端测试用） ──────────────────────────────────────────────
 
 class FakeSink implements PartSink {
   openPart = vi.fn(async () => 1)
@@ -13,12 +19,24 @@ class FakeSink implements PartSink {
   finalizePart = vi.fn(async () => ({ ok: true, actual: 'sha' }))
 }
 
-class FakeTransport {
+/** 发送端测试用 transport：meta 帧发出后自动回一个「全缺」resume_manifest（T06 握手） */
+class AutoResumeTransport {
   sent: Uint8Array[] = []
   bufferedAmount = 0
   lowCallback: (() => void) | null = null
+  onResume: ((files: ResumeFileState[]) => void) | null = null
+
   send(frame: Uint8Array) {
     this.sent.push(frame)
+    const control = parseControl(frame) as TransferControlMessage | null
+    if (control?.type === 'meta' && this.onResume) {
+      this.onResume(
+        control.files.map((f) => ({
+          id: f.id,
+          parts: f.parts.map((p) => ({ index: p.index, state: 'partial', bitfield: '' })),
+        })),
+      )
+    }
   }
   onBufferedAmountLow(cb: () => void) {
     this.lowCallback = cb
@@ -26,7 +44,6 @@ class FakeTransport {
       this.lowCallback = null
     }
   }
-  /** 测试辅助：模拟缓冲排空触发事件 */
   drain() {
     this.bufferedAmount = 0
     this.lowCallback?.()
@@ -35,13 +52,15 @@ class FakeTransport {
 
 function setup() {
   const sink = new FakeSink()
-  const transport = new FakeTransport()
+  const transport = new AutoResumeTransport()
   const events = {
     onMeta: [] as unknown[],
     onProgress: [] as unknown[],
     onRecvProgress: [] as unknown[],
     onFileDone: [] as number[],
     onError: [] as string[],
+    onResumeMismatch: [] as string[],
+    onPartDone: [] as [number, number][],
   }
   const controller = new TransferController(sink, transport, {
     onMeta: (files, sessionId) => events.onMeta.push([files, sessionId]),
@@ -49,7 +68,12 @@ function setup() {
     onRecvProgress: (f, p, r, t) => events.onRecvProgress.push([f, p, r, t]),
     onFileDone: (f) => events.onFileDone.push(f),
     onError: (r) => events.onError.push(r),
+    onResumeMismatch: (n) => events.onResumeMismatch.push(n),
+    onPartDone: (f, p) => events.onPartDone.push([f, p]),
   })
+  transport.onResume = (files) => {
+    controller.handleData(encodeControl({ type: 'resume_manifest', files } satisfies ResumeManifestMessage).buffer as ArrayBuffer)
+  }
   return { sink, transport, events, controller }
 }
 
@@ -65,6 +89,238 @@ function metaOf(files: { id: number; name: string; size: number }[]): MetaMessag
     })),
   }
 }
+
+// ── 端到端（wire pair + 真字节 MemorySink + FakeResumeStore） ────────────────
+
+/**
+ * 真字节内存 sink：按 (fileId, partIndex) 存 chunk，finalize 计算真实 SHA-256，
+ * 可拼接出 part 完整字节 —— 用于断言「重传后最终文件与源一致」。
+ */
+class MemorySink implements PartSink {
+  readonly chunks = new Map<string, Map<number, Uint8Array>>()
+  readonly finalized: string[] = []
+  private writers = new Map<number, string>()
+  private nextWriter = 1
+  failNextFinalize = false
+
+  async openPart(_sessionId: string, fileId: number, partIndex: number): Promise<number> {
+    const key = `${fileId}:${partIndex}`
+    // 续传时磁盘上已有该 part 的部分字节：只在不存在时创建（不清空已有数据）
+    if (!this.chunks.has(key)) this.chunks.set(key, new Map())
+    const id = this.nextWriter++
+    this.writers.set(id, key)
+    return id
+  }
+  async writeChunk(writerId: number, offset: number, payload: Uint8Array): Promise<void> {
+    const key = this.writers.get(writerId)!
+    this.chunks.get(key)!.set(offset, new Uint8Array(payload))
+  }
+  async closeWriter(writerId: number): Promise<void> {
+    this.writers.delete(writerId)
+  }
+  async finalizePart(_sessionId: string, fileId: number, partIndex: number, expectedSha256: string) {
+    const key = `${fileId}:${partIndex}`
+    const bytes = this.mergePart(fileId, partIndex)
+    const actual = await sha256Hex(bytes)
+    this.finalized.push(key)
+    if (this.failNextFinalize) {
+      this.failNextFinalize = false
+      return { ok: false, actual }
+    }
+    return { ok: actual === expectedSha256, actual }
+  }
+  /** 按 offset 顺序拼接 part 字节 */
+  mergePart(fileId: number, partIndex: number): Uint8Array {
+    const map = this.chunks.get(`${fileId}:${partIndex}`) ?? new Map()
+    const offsets = [...map.keys()].sort((a, b) => a - b)
+    const total = offsets.reduce((s, o) => s + map.get(o)!.length, 0)
+    const buf = new Uint8Array(total)
+    let at = 0
+    for (const o of offsets) {
+      buf.set(map.get(o)!, at)
+      at += map.get(o)!.length
+    }
+    return buf
+  }
+}
+
+class FakeResumeStore implements ResumeStore {
+  readonly records = new Map<string, SessionManifest>()
+  async get(sessionId: string) {
+    return this.records.get(sessionId)
+  }
+  async list() {
+    return [...this.records.values()]
+  }
+  async upsert(record: SessionManifest) {
+    this.records.set(record.sessionId, structuredClone(record))
+  }
+}
+
+interface Pair {
+  a: TransferController
+  b: TransferController
+  sinkA: MemorySink
+  sinkB: MemorySink
+  store: FakeResumeStore
+  transportA: WireTransport
+  transportB: WireTransport
+}
+
+type SentFrame = { kind: 'control' | 'chunk'; chunkIndex?: number }
+
+/** A→B 方向的可控 transport：按帧计数触发背压暂停（确定性的「传到一半断连」） */
+class WireTransport {
+  readonly sent: SentFrame[] = []
+  bufferedAmount = 0
+  lowCallback: (() => void) | null = null
+  /** 帧数达到该值后置背压（null = 不暂停）；测试可中途改 */
+  pauseAfter: number | null = null
+  private target: (frame: Uint8Array) => void
+
+  constructor(target: (frame: Uint8Array) => void, pauseAfter: number | null = null) {
+    this.target = target
+    this.pauseAfter = pauseAfter
+  }
+
+  /** 重载模拟：把链路指向新实例 */
+  setTarget(fn: (frame: Uint8Array) => void): void {
+    this.target = fn
+  }
+
+  send(frame: Uint8Array) {
+    const chunk = parseChunk(frame)
+    this.sent.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+    this.target(frame)
+    // 超过阈值后把缓冲置为超限 → 发送端 pump 停住（模拟连接被掐/背压）
+    if (this.pauseAfter !== null && this.sent.length >= this.pauseAfter) {
+      this.bufferedAmount = BACKPRESSURE_LIMIT + 1
+    }
+  }
+  onBufferedAmountLow(cb: () => void) {
+    this.lowCallback = cb
+    return () => {
+      this.lowCallback = null
+    }
+  }
+  drain() {
+    this.bufferedAmount = 0
+    this.lowCallback?.()
+  }
+}
+
+/** 两台 controller 用真字节 sink + 共享 resume store 互联 */
+function pair(opts: { failOnce?: boolean } = {}): Pair {
+  const store = new FakeResumeStore()
+  const sinkA = new MemorySink()
+  const sinkB = new MemorySink()
+  if (opts.failOnce) sinkB.failNextFinalize = true
+
+  let a!: TransferController
+  let b!: TransferController
+  const transportA = new WireTransport((f) => b.handleData(f.buffer as ArrayBuffer))
+  const transportB = new WireTransport((f) => a.handleData(f.buffer as ArrayBuffer))
+
+  const eventsOf = () => ({
+    onMeta: () => {},
+    onProgress: () => {},
+    onRecvProgress: () => {},
+    onFileDone: () => {},
+    onError: () => {},
+    onResumeMismatch: () => {},
+    onPartDone: () => {},
+  })
+  a = new TransferController(sinkA, transportA, eventsOf(), store)
+  b = new TransferController(sinkB, transportB, eventsOf(), store)
+  return { a, b, sinkA, sinkB, store, transportA, transportB }
+}
+
+function bigSource(sizeBytes = CHUNK_SIZE * 300): { file: { id: number; name: string; size: number; source: FileSource }; bytes: Uint8Array } {
+  // 均匀字节即可（sha256 一致性）；避免 .map() 二次分配
+  const bytes = new Uint8Array(sizeBytes).fill(0x5a)
+  return {
+    bytes,
+    file: {
+      id: 0,
+      name: 'big.bin',
+      size: bytes.length,
+      source: { name: 'big.bin', size: bytes.length, slice: async (s, e) => bytes.subarray(s, e) },
+    },
+  }
+}
+
+const waitUntil = async (fn: () => boolean, timeoutMs = 5000) => {
+  const start = Date.now()
+  while (!fn()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitUntil timeout')
+    await new Promise((r) => setTimeout(r, 0))
+  }
+}
+
+const noopEvents = () => ({
+  onMeta: () => {},
+  onProgress: () => {},
+  onRecvProgress: () => {},
+  onFileDone: () => {},
+  onError: () => {},
+  onResumeMismatch: () => {},
+  onPartDone: () => {},
+})
+
+function makeReceiver(sink: PartSink, store: FakeResumeStore, sendTo: (f: Uint8Array) => void): TransferController {
+  return new TransferController(
+    sink,
+    { send: (f) => sendTo(f), bufferedAmount: 0, onBufferedAmountLow: () => () => {} },
+    noopEvents(),
+    store,
+  )
+}
+
+function makeSender(
+  transport: { send(frame: Uint8Array): void; readonly bufferedAmount: number; onBufferedAmountLow(callback: () => void): () => void },
+  events: ReturnType<typeof noopEvents>,
+): TransferController {
+  return new TransferController(new FakeSink(), transport, events)
+}
+
+/** 发送端用的可控 transport：到达 N 帧后置背压暂停 */
+function pacedTransport(sent: SentFrame[], target: (f: Uint8Array) => void, pauseAfter: number) {
+  const t: {
+    sent: SentFrame[]
+    bufferedAmount: number
+    lowCallback: (() => void) | null
+    pauseAfter: number | null
+    send(f: Uint8Array): void
+    onBufferedAmountLow(cb: () => void): () => void
+    drain(): void
+  } = {
+    sent,
+    bufferedAmount: 0,
+    lowCallback: null,
+    pauseAfter,
+    send(f: Uint8Array) {
+      const chunk = parseChunk(f)
+      sent.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+      target(f)
+      if (t.pauseAfter !== null && sent.length >= t.pauseAfter) {
+        this.bufferedAmount = BACKPRESSURE_LIMIT + 1
+      }
+    },
+    onBufferedAmountLow(cb: () => void) {
+      this.lowCallback = cb
+      return () => {
+        this.lowCallback = null
+      }
+    },
+    drain() {
+      this.bufferedAmount = 0
+      this.lowCallback?.()
+    },
+  }
+  return t
+}
+
+// ── 旧式单端测试（T05 回归） ────────────────────────────────────────────────
 
 describe('TransferController — 接收路径', () => {
   it('接收 chunk → onRecvProgress 上报', async () => {
@@ -103,7 +359,7 @@ describe('TransferController — 接收路径', () => {
 })
 
 describe('TransferController — 发送路径', () => {
-  it('startSend：先算 part SHA-256，发 meta 控制帧，再按序发 chunk 帧', async () => {
+  it('startSend：先算 part SHA-256，发 meta 控制帧，等 resume_manifest 后按序发 chunk 帧', async () => {
     const { transport, controller } = setup()
     const bytes = new Uint8Array(CHUNK_SIZE * 2 + 1)
     const source: FileSource = {
@@ -180,5 +436,153 @@ describe('TransferController — 发送路径', () => {
     const { controller, events } = setup()
     controller.handleData(encodeControl({ type: 'file_done', fileId: 3 }).buffer as ArrayBuffer)
     expect(events.onFileDone).toEqual([3])
+  })
+})
+
+// ── T06 端到端：断连 → 恢复 → 只补缺失 ───────────────────────────────────────
+
+describe('TransferController — 续传端到端（T06 主 seam）', () => {
+  it('断连重建：第二轮只补缺失块，重传量 ≈ 缺失量，最终文件与源一致', async () => {
+    const { a, b, sinkB, transportA } = pair()
+    const { file, bytes } = bigSource()
+    const ac = new AbortController()
+
+    // 第一轮：meta + 块 0（256 chunk）发出后，发送端被背压停住 → 断连
+    transportA.pauseAfter = 1 + CHUNKS_PER_BLOCK // meta 帧 + 256 chunk 后暂停
+    const run1 = a.startSend([file], ac.signal)
+    await waitUntil(() => (sinkB.chunks.get('0:0')?.size ?? 0) >= CHUNKS_PER_BLOCK)
+    ac.abort()
+    transportA.drain() // 让发送循环退出
+    await run1
+    transportA.pauseAfter = null // 第二轮不再背压暂停
+
+    // 第二轮：重连（同 sessionId）→ 只补块 1（chunk 256..299）
+    const framesBefore = transportA.sent.length
+    await a.resumeSend()
+    const chunks2 = transportA.sent
+      .slice(framesBefore)
+      .filter((s) => s.kind === 'chunk')
+      .map((s) => s.chunkIndex!)
+    expect(chunks2).toEqual(Array.from({ length: 300 - CHUNKS_PER_BLOCK }, (_, i) => CHUNKS_PER_BLOCK + i))
+
+    // B 完成 part：真实字节与源一致（SHA-256 一致）
+    await waitUntil(() => sinkB.finalized.includes('0:0'))
+    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+    void b
+  })
+
+  it('接收端重载恢复：新实例从 store 按 sessionId 恢复，只补缺失', async () => {
+    const { a, sinkB, store, transportA } = pair()
+    const { file, bytes } = bigSource()
+    const ac = new AbortController()
+
+    transportA.pauseAfter = 1 + CHUNKS_PER_BLOCK
+    const run1 = a.startSend([file], ac.signal)
+    await waitUntil(() => (sinkB.chunks.get('0:0')?.size ?? 0) >= CHUNKS_PER_BLOCK)
+    ac.abort()
+    transportA.drain()
+    await run1
+    transportA.pauseAfter = null // 第二轮不再背压暂停
+    await new Promise((r) => setTimeout(r, 2100)) // 等节流持久化落盘
+    expect(store.records.size).toBe(1)
+
+    // 接收端「重载」：新 controller + 同一 store/磁盘，链路重指向 b2
+    const b2 = makeReceiver(sinkB, store, (f) => a.handleData(f.buffer as ArrayBuffer))
+    transportA.setTarget((f) => b2.handleData(f.buffer as ArrayBuffer))
+
+    const framesBefore = transportA.sent.length
+    await a.resumeSend()
+    const chunks2 = transportA.sent
+      .slice(framesBefore)
+      .filter((s) => s.kind === 'chunk')
+      .map((s) => s.chunkIndex!)
+    expect(chunks2).toHaveLength(300 - CHUNKS_PER_BLOCK)
+    expect(chunks2[0]).toBe(CHUNKS_PER_BLOCK)
+    await waitUntil(() => sinkB.finalized.includes('0:0'))
+    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+  })
+
+  it('发送端重载：新 controller 新 sessionId，按 name+size 匹配已收会话，只补缺失', async () => {
+    const store = new FakeResumeStore()
+    const sinkB = new MemorySink()
+    // 接收端 b（带 store），其发出的消息路由到当前发送端
+    let senderTarget: (f: Uint8Array) => void = () => {}
+    const b = makeReceiver(sinkB, store, (f) => senderTarget(f))
+    const events = noopEvents()
+
+    // 第一轮发送端 a1：meta + 块 0 后背压暂停 → 断连
+    const sent1: SentFrame[] = []
+    const t1 = pacedTransport(sent1, (f) => b.handleData(f.buffer as ArrayBuffer), 1 + CHUNKS_PER_BLOCK)
+    const a1 = makeSender(t1, events)
+    senderTarget = (f) => a1.handleData(f.buffer as ArrayBuffer)
+    const ac = new AbortController()
+    const { file, bytes } = bigSource()
+    const p1 = a1.startSend([file], ac.signal)
+    await waitUntil(() => (sinkB.chunks.get('0:0')?.size ?? 0) >= CHUNKS_PER_BLOCK)
+    ac.abort()
+    t1.drain()
+    await p1
+    t1.pauseAfter = null // 第二轮不再背压暂停
+    await new Promise((r) => setTimeout(r, 2100))
+    expect(store.records.size).toBe(1)
+
+    // 发送端「重载」：新 controller A2（新 sessionId），重新选同一文件 → name+size 匹配
+    const sent2: SentFrame[] = []
+    const a2 = makeSender(
+      {
+        send: (f) => {
+          const chunk = parseChunk(f)
+          sent2.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+          b.handleData(f.buffer as ArrayBuffer)
+        },
+        bufferedAmount: 0,
+        onBufferedAmountLow: () => () => {},
+      },
+      events,
+    )
+    senderTarget = (f) => a2.handleData(f.buffer as ArrayBuffer)
+    const { file: file2 } = bigSource()
+    await a2.startSend([file2])
+    const chunks2 = sent2.filter((s) => s.kind === 'chunk').map((s) => s.chunkIndex!)
+    expect(chunks2).toHaveLength(300 - CHUNKS_PER_BLOCK)
+    expect(chunks2[0]).toBe(CHUNKS_PER_BLOCK)
+    await waitUntil(() => sinkB.finalized.includes('0:0'))
+    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+  })
+
+  it('part 校验失败：B 清位图 + part_reset → 重发 → 最终字节一致', async () => {
+    const { a, sinkB } = pair({ failOnce: true })
+    const { file, bytes } = bigSource(CHUNK_SIZE * 2) // 小文件（2 chunk，1 块）
+    await a.startSend([file])
+    await waitUntil(() => sinkB.finalized.length >= 2) // 第 1 次失败 + 第 2 次成功
+    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+  })
+
+  it('位图持久化节流 ≤2s：块完成后延迟落盘', async () => {
+    vi.useFakeTimers()
+    try {
+      const { a, b, sinkB, store, transportA } = pair()
+      const { file } = bigSource(CHUNK_SIZE * CHUNKS_PER_BLOCK) // 恰好 1 块
+      transportA.pauseAfter = 1 + CHUNKS_PER_BLOCK
+      const p = a.startSend([file])
+      // fake 时钟下轮询：advanceTimersByTimeAsync 同时 flush 微任务
+      for (let i = 0; i < 20_000 && (sinkB.chunks.get('0:0')?.size ?? 0) < CHUNKS_PER_BLOCK; i++) {
+        await vi.advanceTimersByTimeAsync(0)
+      }
+      expect(sinkB.chunks.get('0:0')?.size).toBe(CHUNKS_PER_BLOCK)
+      transportA.drain()
+      await p
+      // 未到节流周期（fake 时钟仍接近 0）：不落盘
+      expect(store.records.size).toBe(0)
+      await vi.advanceTimersByTimeAsync(1999)
+      expect(store.records.size).toBe(0)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(store.records.size).toBe(1)
+      const rec = store.records.get([...store.records.keys()][0])!
+      expect(rec.files[0].parts?.[0].state).toBe('partial')
+      void b
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

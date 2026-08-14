@@ -4,6 +4,24 @@ import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '..
 import type { OrphanReport } from '../storage'
 
 const DEVICE_NAME_KEY = 'lt.deviceName'
+const ORPHAN_AGE_MS = 30 * 24 * 60 * 60 * 1000
+
+interface IncompleteFile {
+  fileId: number
+  name: string
+  size: number
+  doneParts: number
+  totalParts: number
+  bytes: number
+}
+
+interface IncompleteSession {
+  sessionId: string
+  lastActiveAt: number
+  expired: boolean
+  files: IncompleteFile[]
+  totalBytes: number
+}
 
 export default function Settings() {
   const [name, setName] = useState('')
@@ -63,6 +81,71 @@ export default function Settings() {
     }
   }
 
+  // ── T06：未完成会话（续传 / 删除） ───────────────────────────────────────
+  const [sessions, setSessions] = useState<IncompleteSession[]>([])
+  const [sessionMsg, setSessionMsg] = useState('')
+
+  useEffect(() => {
+    void refreshSessions()
+  }, [])
+
+  async function refreshSessions() {
+    try {
+      const [records, dirs] = await Promise.all([
+        getSessionStore().list(),
+        getStorageAdapter().listSessions(),
+      ])
+      const bytesBySession = new Map(dirs.map((d) => [d.sessionId, d.bytes]))
+      const now = Date.now()
+      const incomplete: IncompleteSession[] = []
+      for (const record of records) {
+        const files: IncompleteFile[] = []
+        for (const f of record.files) {
+          const parts = f.parts ?? []
+          const done = parts.filter((p) => p.state === 'done').length
+          const total = Math.max(f.partCount, parts.length)
+          // 有 part 记录且未全部完成 → 未完成
+          if (parts.length > 0 && done < total) {
+            files.push({
+              fileId: f.fileId,
+              name: f.name,
+              size: f.size,
+              doneParts: done,
+              totalParts: total,
+              bytes: bytesBySession.get(record.sessionId) ?? 0,
+            })
+          }
+        }
+        if (files.length > 0) {
+          incomplete.push({
+            sessionId: record.sessionId,
+            lastActiveAt: record.lastActiveAt,
+            expired: now - record.lastActiveAt > ORPHAN_AGE_MS,
+            files,
+            totalBytes: bytesBySession.get(record.sessionId) ?? 0,
+          })
+        }
+      }
+      setSessions(incomplete)
+    } catch (e) {
+      setSessionMsg(`读取会话失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  async function handleDeleteSession(sessionId: string) {
+    setBusy(true)
+    try {
+      await getStorageAdapter().deleteSession(sessionId)
+      await getSessionStore().delete(sessionId)
+      setSessionMsg('已删除未完成会话（含部分文件）')
+      await refreshSessions()
+    } catch (e) {
+      setSessionMsg(`删除失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <>
       <h1>设置</h1>
@@ -109,6 +192,40 @@ export default function Settings() {
         {clearResult && <p>{clearResult}</p>}
         <p className="muted">
           传输接收的文件暂存在本应用沙盒（OPFS），此操作会清空全部未导出的数据。
+        </p>
+      </section>
+
+      <section className="card">
+        <h2>未完成会话（续传 / 删除）</h2>
+        {sessionMsg && <p>{sessionMsg}</p>}
+        {sessions.length === 0 && !sessionMsg && (
+          <p className="muted">没有未完成的传输。断线后回到首页重新配对，会自动从断点继续。</p>
+        )}
+        {sessions.map((s) => (
+          <div key={s.sessionId} style={{ margin: '10px 0', padding: '8px', border: '1px solid var(--line)', borderRadius: 8 }}>
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <span className="mono" style={{ fontSize: 12 }}>
+                {s.sessionId.slice(0, 8)}… · {formatBytes(s.totalBytes)}
+                {s.expired ? ' · 已超 30 天' : ''}
+              </span>
+              <button onClick={() => void handleDeleteSession(s.sessionId)} disabled={busy} style={{ padding: '2px 10px' }}>
+                删除
+              </button>
+            </div>
+            <ul style={{ listStyle: 'none', margin: '6px 0 0', padding: 0 }}>
+              {s.files.map((f) => (
+                <li key={f.fileId} className="mono" style={{ fontSize: 12, margin: '2px 0' }}>
+                  {f.name}（{formatBytes(f.size)}）· 已收 {f.doneParts}/{f.totalParts} part
+                </li>
+              ))}
+            </ul>
+            <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
+              回首页重新配对后自动续传（只补缺失部分）。
+            </p>
+          </div>
+        ))}
+        <p className="muted" style={{ fontSize: 12 }}>
+          续传进度由接收端保存（位图节流写入）；超过 30 天未活跃的会话标记为可清理。
         </p>
       </section>
 

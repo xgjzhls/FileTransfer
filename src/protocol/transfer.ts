@@ -47,4 +47,28 @@ export interface PartResetMessage {
   partIndex: number
 }
 
-export type TransferControlMessage = MetaMessage | PartDoneMessage | FileDoneMessage | PartResetMessage
+/** 单个 part 的续传状态（SPEC §3.2 resume_manifest） */
+export interface ResumePartState {
+  index: number
+  state: 'done' | 'partial'
+  /** base64 位图：bit b = 续传块 b 完整（64MiB 粒度）；done 的 part 可留空 */
+  bitfield: string
+}
+
+export interface ResumeFileState {
+  id: number
+  parts: ResumePartState[]
+}
+
+/** 续传握手：接收端回应 meta（SPEC §3.4 步骤 2） */
+export interface ResumeManifestMessage {
+  type: 'resume_manifest'
+  files: ResumeFileState[]
+}
+
+export type TransferControlMessage =
+  | MetaMessage
+  | PartDoneMessage
+  | FileDoneMessage
+  | PartResetMessage
+  | ResumeManifestMessage

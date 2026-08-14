@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { findOrphans, formatBytes, getStorageAdapter } from '../storage'
+import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '../storage'
 import type { OrphanReport } from '../storage'
+import { clearSendProgress, getSendProgress, setSendProgress } from '../transfer/progressCache'
 import { createBrowserSocket } from '../signaling/client'
 import type { SignalingEvents } from '../signaling/client'
 import { ReconnectingSignalingClient } from '../signaling/reconnect'
@@ -45,6 +46,8 @@ interface SendItem {
   status: 'pending' | 'transferring' | 'done'
   sentChunks: number
   totalChunks: number
+  /** 已完成 part 数（本地进度缓存恢复，非权威） */
+  doneParts: number
 }
 
 interface RecvItem {
@@ -91,6 +94,13 @@ export default function Home() {
   const roomRef = useRef('')
   const managerRef = useRef<ConnectionManager | null>(null)
   const controllerRef = useRef<TransferController | null>(null)
+  /** T06：记录当前连接的对端 + 断连中断标记（自动续传） */
+  const peerIdRef = useRef<string | null>(null)
+  const interruptedRef = useRef(false)
+  const connStateRef = useRef(connState)
+  useEffect(() => {
+    connStateRef.current = connState
+  }, [connState])
 
   useEffect(() => {
     let cancelled = false
@@ -122,6 +132,13 @@ export default function Home() {
     return () => {
       delete (window as unknown as { __ltSignaling?: unknown }).__ltSignaling
     }
+  }, [])
+
+  // 页面关闭/切后台时把未落盘的续传位图写掉（崩溃最多重传 64MiB + 在途）
+  useEffect(() => {
+    const flush = () => void controllerRef.current?.flushResume()
+    window.addEventListener('pagehide', flush)
+    return () => window.removeEventListener('pagehide', flush)
   }, [])
 
   function ensureController(): TransferController {
@@ -162,13 +179,34 @@ export default function Home() {
             )
           },
           onFileDone: (fileId) => {
-            setSendItems((prev) => prev.map((it) => (it.id === fileId ? { ...it, status: 'done' } : it)))
+            setSendItems((prev) => {
+              const done = prev.map((it): SendItem =>
+                it.id === fileId ? { ...it, status: 'done' } : it,
+              )
+              for (const it of done) {
+                if (it.id === fileId) clearSendProgress(it.file.name, it.file.size)
+              }
+              return done
+            })
             setRecvItems((prev) =>
               prev.map((it) => (it.id === fileId ? { ...it, status: 'done' } : it)),
             )
           },
           onError: (r) => setError(r),
+          onPartDone: (fileId, partIndex) => {
+            // 本地进度缓存（重载后恢复显示；非权威）
+            setSendItems((prev) =>
+              prev.map((it) => {
+                if (it.id !== fileId) return it
+                setSendProgress(it.file.name, it.file.size, partIndex + 1)
+                return { ...it, doneParts: partIndex + 1 }
+              }),
+            )
+          },
+          onResumeMismatch: (fileName) =>
+            setStatus(`文件 ${fileName} 与已收清单不一致（可能被修改），已重新开始接收`),
         },
+        getSessionStore(),
       )
     }
     return controllerRef.current
@@ -183,7 +221,11 @@ export default function Home() {
       if (payload.kind === 'offer') void ensureManager().handleOffer(from, payload)
       else void ensureManager().handleAnswer(payload)
     },
-    onError: (r) => setError(r),
+    onError: (r) => {
+      setError(r)
+      // 对端已离开（如接收端重载换新 device id）：自动重连无目标 → 复位连接态，允许重新点选
+      if (r === 'peer not found') setConnState('idle')
+    },
   }
 
   function ensureManager(): ConnectionManager {
@@ -259,15 +301,53 @@ export default function Home() {
     }
   }
 
-  // 连接失败时自动收集候选（定位 fake-ip / mDNS / 路由器过滤）
+  // 断连自动续传（T06 验收 4）：DataChannel 断开 → 中断发送 + 自动重建 → 恢复后 resumeSend
   useEffect(() => {
     if (connState === 'failed' || connState === 'disconnected') {
+      interruptedRef.current = true
+      abortRef.current?.abort() // 停掉当前发送循环（重连后 resumeSend 续传）
       void runDiag()
+      // 信令在线且有对端 → 自动重建 DataChannel（重新 offer）
+      if (wsState === 'connected' && peerIdRef.current) {
+        if (connState === 'failed') {
+          void ensureManager().reconnectTo(peerIdRef.current).catch(() => {})
+        } else {
+          // disconnected 可能是瞬时抖动（ICE 可自愈）：5s 后仍未 connected 再重建
+          const t = setTimeout(() => {
+            if (connStateRef.current !== 'connected' && peerIdRef.current) {
+              void ensureManager().reconnectTo(peerIdRef.current).catch(() => {})
+            }
+          }, 5000)
+          return () => clearTimeout(t)
+        }
+      }
+    } else if (connState === 'connected') {
+      if (interruptedRef.current) {
+        interruptedRef.current = false
+        void resumeAfterReconnect()
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connState])
+  }, [connState, wsState])
+
+  /** 重连成功后自动续传：同 sessionId 重握手，只补缺失块 */
+  async function resumeAfterReconnect() {
+    setStatus('连接已恢复，自动续传中…')
+    const ac = new AbortController()
+    abortRef.current = ac
+    try {
+      await managerRef.current?.waitChannel(10_000)
+      await ensureController().resumeSend(ac.signal)
+      if (!ac.signal.aborted) setStatus('发送完成')
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    }
+  }
 
   async function connectTo(peerId: string) {
+    peerIdRef.current = peerId
     setError('')
     try {
       await ensureManager().connectTo(peerId)
@@ -283,7 +363,17 @@ export default function Home() {
   function onFilesSelected() {
     const files = Array.from(fileInputRef.current?.files ?? [])
     if (files.length === 0) return
-    setSendItems(files.map((file, i) => ({ id: i, file, status: 'pending', sentChunks: 0, totalChunks: 0 })))
+    const progress = getSendProgress()
+    setSendItems(
+      files.map((file, i) => ({
+        id: i,
+        file,
+        status: 'pending',
+        sentChunks: 0,
+        totalChunks: 0,
+        doneParts: progress[`${file.name}:${file.size}`] ?? 0,
+      })),
+    )
     setStatus(`已选 ${files.length} 个文件，点「开始发送」`)
   }
 
@@ -315,7 +405,8 @@ export default function Home() {
     }))
     try {
       await ensureController().startSend(sources, abortRef.current.signal)
-      setStatus('发送完成')
+      if (abortRef.current.signal.aborted) setStatus('传输中断，等待重连自动续传…')
+      else setStatus('发送完成')
     } catch (e) {
       if ((e as Error).name === 'AbortError') setStatus('已取消')
       else setError(e instanceof Error ? e.message : String(e))
@@ -511,7 +602,11 @@ export default function Home() {
                       <span className="ok">完成 ✓</span>
                     ) : (
                       <span className="mono">
-                        {it.totalChunks > 0 ? `${it.sentChunks}/${it.totalChunks} chunk` : '排队中'}
+                        {it.totalChunks > 0
+                          ? `${it.sentChunks}/${it.totalChunks} chunk`
+                          : it.doneParts > 0
+                            ? `续传：已完成 ${it.doneParts} 个 part（重新发送时自动继续）`
+                            : '排队中'}
                       </span>
                     )}
                   </li>
