@@ -74,6 +74,10 @@ export default function Home() {
 
   // 传输状态
   const [sendItems, setSendItems] = useState<SendItem[]>([])
+  const sendItemsRef = useRef<SendItem[]>([])
+  useEffect(() => {
+    sendItemsRef.current = sendItems
+  }, [sendItems])
   const [recvItems, setRecvItems] = useState<RecvItem[]>([])
   const [exportMsg, setExportMsg] = useState('')
   const [sessionId, setSessionId] = useState('')
@@ -179,28 +183,24 @@ export default function Home() {
             )
           },
           onFileDone: (fileId) => {
-            setSendItems((prev) => {
-              const done = prev.map((it): SendItem =>
-                it.id === fileId ? { ...it, status: 'done' } : it,
-              )
-              for (const it of done) {
-                if (it.id === fileId) clearSendProgress(it.file.name, it.file.size)
-              }
-              return done
-            })
+            // 缓存写操作移出 state updater（StrictMode 双调用纯度）
+            const items = sendItemsRef.current
+            const it = items.find((x) => x.id === fileId)
+            if (it) clearSendProgress(it.file.name, it.file.size)
+            setSendItems((prev) =>
+              prev.map((x): SendItem => (x.id === fileId ? { ...x, status: 'done' } : x)),
+            )
             setRecvItems((prev) =>
               prev.map((it) => (it.id === fileId ? { ...it, status: 'done' } : it)),
             )
           },
           onError: (r) => setError(r),
           onPartDone: (fileId, partIndex) => {
-            // 本地进度缓存（重载后恢复显示；非权威）
+            // 本地进度缓存（重载后恢复显示；非权威）——写操作在 updater 外
+            const it = sendItemsRef.current.find((x) => x.id === fileId)
+            if (it) setSendProgress(it.file.name, it.file.size, partIndex + 1)
             setSendItems((prev) =>
-              prev.map((it) => {
-                if (it.id !== fileId) return it
-                setSendProgress(it.file.name, it.file.size, partIndex + 1)
-                return { ...it, doneParts: partIndex + 1 }
-              }),
+              prev.map((x) => (x.id === fileId ? { ...x, doneParts: partIndex + 1 } : x)),
             )
           },
           onResumeMismatch: (fileName) =>

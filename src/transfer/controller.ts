@@ -152,20 +152,22 @@ export class TransferController {
   }
 
   private async handleMeta(msg: MetaMessage): Promise<void> {
-    const stored = this.resumeStore ? await this.loadStored(msg) : undefined
-    this.receiver.onMeta(msg, stored)
-    this.events.onMeta(msg.files, msg.sessionId)
-    this.initRecord(msg, stored)
+    const record = this.resumeStore ? await this.loadStored(msg) : undefined
+    this.receiver.onMeta(msg, record)
+    // 存储/导出目录用接收端的有效 sessionId（发送端重载续传时沿用旧目录）
+    const effSession = this.receiver.sessionId
+    this.events.onMeta(msg.files, effSession)
+    this.initRecord(msg, effSession, record?.files)
   }
 
-  private async loadStored(msg: MetaMessage): Promise<FileManifest[] | undefined> {
+  /** 匹配已有会话记录：先按 sessionId，再按「文件 name+size 集合」（发送端重载） */
+  private async loadStored(msg: MetaMessage): Promise<SessionManifest | undefined> {
     const bySession = await this.resumeStore!.get(msg.sessionId)
-    if (bySession) return bySession.files
-    // 发送端重载（新 sessionId）：按「文件 name+size 集合」匹配已收会话
+    if (bySession) return bySession
     const wanted = this.fileKey(msg.files)
     for (const record of await this.resumeStore!.list()) {
       if (record.files.length === msg.files.length && this.fileKey(record.files) === wanted) {
-        return record.files
+        return record
       }
     }
     return undefined
@@ -175,15 +177,17 @@ export class TransferController {
     return files.map((f) => `${f.name}:${f.size}`).sort().join('|')
   }
 
-  /** 接收端：初始化权威记录（沿用 stored 中 sha256 匹配的 part 状态） */
-  private initRecord(msg: MetaMessage, stored?: FileManifest[]): void {
+  /** 接收端：初始化权威记录（沿用匹配记录中 sha256 一致的 part 状态） */
+  private initRecord(msg: MetaMessage, effSession: string, storedFiles?: FileManifest[]): void {
     if (!this.resumeStore) return
+    // 同会话（同页重连）：内存记录已是最新（节流持久化覆盖），不重建
+    if (this.record && this.record.sessionId === effSession) return
     this.record = {
-      sessionId: msg.sessionId,
+      sessionId: effSession,
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
       files: msg.files.map((f) => {
-        const sf = stored?.find((s) => s.name === f.name && s.size === f.size)
+        const sf = storedFiles?.find((s) => s.name === f.name && s.size === f.size)
         const parts = f.parts.map((p) => {
           const sp = sf?.parts?.find((x) => x.index === p.index)
           const usable = sp !== undefined && sp.sha256 === p.sha256
@@ -295,6 +299,8 @@ export class TransferController {
         }
         break
       case 'resume_manifest':
+        // 迟到的 manifest（gate 已超时）落入 pendingResume：被下一次 startSend 消费。
+        // 安全前提：旧 plan 只会导致少发（receiver 已收块），最终由 SHA-256 校验/part_reset 自愈
         if (this.resumeWait) {
           this.resumeWait.resolve(msg.files)
           this.resumeWait = null

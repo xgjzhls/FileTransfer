@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
-import { clearAllData, cleanupOrphans } from '../storage/cleanup'
+import { Link } from 'react-router-dom'
+import { clearAllData, cleanupOrphans, ORPHAN_AGE_MS } from '../storage/cleanup'
 import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '../storage'
 import type { OrphanReport } from '../storage'
 
 const DEVICE_NAME_KEY = 'lt.deviceName'
-const ORPHAN_AGE_MS = 30 * 24 * 60 * 60 * 1000
 
 interface IncompleteFile {
   fileId: number
@@ -211,6 +211,7 @@ export default function Settings() {
               <button onClick={() => void handleDeleteSession(s.sessionId)} disabled={busy} style={{ padding: '2px 10px' }}>
                 删除
               </button>
+              <Link to="/" style={{ fontSize: 13 }}>续传 →</Link>
             </div>
             <ul style={{ listStyle: 'none', margin: '6px 0 0', padding: 0 }}>
               {s.files.map((f) => (

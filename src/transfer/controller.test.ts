@@ -93,36 +93,35 @@ function metaOf(files: { id: number; name: string; size: number }[]): MetaMessag
 // ── 端到端（wire pair + 真字节 MemorySink + FakeResumeStore） ────────────────
 
 /**
- * 真字节内存 sink：按 (fileId, partIndex) 存 chunk，finalize 计算真实 SHA-256，
- * 可拼接出 part 完整字节 —— 用于断言「重传后最终文件与源一致」。
+ * 真字节内存 sink：按 (sessionId, fileId, partIndex) 存 chunk（与真实 OPFS 按会话
+ * 分目录一致），finalize 计算真实 SHA-256，可拼接出 part 完整字节。
  */
 class MemorySink implements PartSink {
   readonly chunks = new Map<string, Map<number, Uint8Array>>()
   readonly finalized: string[] = []
-  private writers = new Map<number, string>()
+  private writers = new Map<number, { key: string; fileId: number; partIndex: number }>()
   private nextWriter = 1
   failNextFinalize = false
 
-  async openPart(_sessionId: string, fileId: number, partIndex: number): Promise<number> {
-    const key = `${fileId}:${partIndex}`
+  async openPart(sessionId: string, fileId: number, partIndex: number): Promise<number> {
+    const key = `${sessionId}:${fileId}:${partIndex}`
     // 续传时磁盘上已有该 part 的部分字节：只在不存在时创建（不清空已有数据）
     if (!this.chunks.has(key)) this.chunks.set(key, new Map())
     const id = this.nextWriter++
-    this.writers.set(id, key)
+    this.writers.set(id, { key, fileId, partIndex })
     return id
   }
   async writeChunk(writerId: number, offset: number, payload: Uint8Array): Promise<void> {
-    const key = this.writers.get(writerId)!
+    const { key } = this.writers.get(writerId)!
     this.chunks.get(key)!.set(offset, new Uint8Array(payload))
   }
   async closeWriter(writerId: number): Promise<void> {
     this.writers.delete(writerId)
   }
-  async finalizePart(_sessionId: string, fileId: number, partIndex: number, expectedSha256: string) {
-    const key = `${fileId}:${partIndex}`
-    const bytes = this.mergePart(fileId, partIndex)
+  async finalizePart(sessionId: string, fileId: number, partIndex: number, expectedSha256: string) {
+    const bytes = this.mergePart(sessionId, fileId, partIndex)
     const actual = await sha256Hex(bytes)
-    this.finalized.push(key)
+    this.finalized.push(`${sessionId}:${fileId}:${partIndex}`)
     if (this.failNextFinalize) {
       this.failNextFinalize = false
       return { ok: false, actual }
@@ -130,8 +129,8 @@ class MemorySink implements PartSink {
     return { ok: actual === expectedSha256, actual }
   }
   /** 按 offset 顺序拼接 part 字节 */
-  mergePart(fileId: number, partIndex: number): Uint8Array {
-    const map = this.chunks.get(`${fileId}:${partIndex}`) ?? new Map()
+  mergePart(sessionId: string, fileId: number, partIndex: number): Uint8Array {
+    const map = this.chunks.get(`${sessionId}:${fileId}:${partIndex}`) ?? new Map()
     const offsets = [...map.keys()].sort((a, b) => a - b)
     const total = offsets.reduce((s, o) => s + map.get(o)!.length, 0)
     const buf = new Uint8Array(total)
@@ -176,6 +175,8 @@ class WireTransport {
   lowCallback: (() => void) | null = null
   /** 帧数达到该值后置背压（null = 不暂停）；测试可中途改 */
   pauseAfter: number | null = null
+  /** 首个 meta 帧（sessionId 提取） */
+  meta: MetaMessage | null = null
   private target: (frame: Uint8Array) => void
 
   constructor(target: (frame: Uint8Array) => void, pauseAfter: number | null = null) {
@@ -190,7 +191,9 @@ class WireTransport {
 
   send(frame: Uint8Array) {
     const chunk = parseChunk(frame)
+    const control = chunk ? null : (parseControl(frame) as TransferControlMessage | null)
     this.sent.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+    if (control?.type === 'meta' && !this.meta) this.meta = control
     this.target(frame)
     // 超过阈值后把缓冲置为超限 → 发送端 pump 停住（模拟连接被掐/背压）
     if (this.pauseAfter !== null && this.sent.length >= this.pauseAfter) {
@@ -249,6 +252,16 @@ function bigSource(sizeBytes = CHUNK_SIZE * 300): { file: { id: number; name: st
   }
 }
 
+
+/** 跨会话统计某 part 已收 chunk 数（MemorySink 按 sessionId 分 key，与真实 OPFS 一致） */
+function partChunkCount(sink: MemorySink, fileId: number, partIndex: number): number {
+  for (const [key, map] of sink.chunks) {
+    const parts = key.split(':')
+    if (parts.length === 3 && Number(parts[1]) === fileId && Number(parts[2]) === partIndex) return map.size
+  }
+  return 0
+}
+
 const waitUntil = async (fn: () => boolean, timeoutMs = 5000) => {
   const start = Date.now()
   while (!fn()) {
@@ -290,6 +303,7 @@ function pacedTransport(sent: SentFrame[], target: (f: Uint8Array) => void, paus
     bufferedAmount: number
     lowCallback: (() => void) | null
     pauseAfter: number | null
+    meta: MetaMessage | null
     send(f: Uint8Array): void
     onBufferedAmountLow(cb: () => void): () => void
     drain(): void
@@ -298,9 +312,12 @@ function pacedTransport(sent: SentFrame[], target: (f: Uint8Array) => void, paus
     bufferedAmount: 0,
     lowCallback: null,
     pauseAfter,
+    meta: null,
     send(f: Uint8Array) {
       const chunk = parseChunk(f)
+      const control = chunk ? null : (parseControl(f) as TransferControlMessage | null)
       sent.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+      if (control?.type === 'meta' && !t.meta) t.meta = control
       target(f)
       if (t.pauseAfter !== null && sent.length >= t.pauseAfter) {
         this.bufferedAmount = BACKPRESSURE_LIMIT + 1
@@ -450,7 +467,9 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     // 第一轮：meta + 块 0（256 chunk）发出后，发送端被背压停住 → 断连
     transportA.pauseAfter = 1 + CHUNKS_PER_BLOCK // meta 帧 + 256 chunk 后暂停
     const run1 = a.startSend([file], ac.signal)
-    await waitUntil(() => (sinkB.chunks.get('0:0')?.size ?? 0) >= CHUNKS_PER_BLOCK)
+    await waitUntil(() => transportA.meta !== null)
+    const sid = transportA.meta!.sessionId
+    await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
     ac.abort()
     transportA.drain() // 让发送循环退出
     await run1
@@ -466,8 +485,8 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     expect(chunks2).toEqual(Array.from({ length: 300 - CHUNKS_PER_BLOCK }, (_, i) => CHUNKS_PER_BLOCK + i))
 
     // B 完成 part：真实字节与源一致（SHA-256 一致）
-    await waitUntil(() => sinkB.finalized.includes('0:0'))
-    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+    await waitUntil(() => sinkB.finalized.includes(`${sid}:0:0`))
+    await expect(sha256Hex(sinkB.mergePart(sid, 0, 0))).resolves.toBe(await sha256Hex(bytes))
     void b
   })
 
@@ -478,7 +497,9 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
 
     transportA.pauseAfter = 1 + CHUNKS_PER_BLOCK
     const run1 = a.startSend([file], ac.signal)
-    await waitUntil(() => (sinkB.chunks.get('0:0')?.size ?? 0) >= CHUNKS_PER_BLOCK)
+    await waitUntil(() => transportA.meta !== null)
+    const sid = transportA.meta!.sessionId
+    await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
     ac.abort()
     transportA.drain()
     await run1
@@ -498,8 +519,8 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
       .map((s) => s.chunkIndex!)
     expect(chunks2).toHaveLength(300 - CHUNKS_PER_BLOCK)
     expect(chunks2[0]).toBe(CHUNKS_PER_BLOCK)
-    await waitUntil(() => sinkB.finalized.includes('0:0'))
-    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+    await waitUntil(() => sinkB.finalized.includes(`${sid}:0:0`))
+    await expect(sha256Hex(sinkB.mergePart(sid, 0, 0))).resolves.toBe(await sha256Hex(bytes))
   })
 
   it('发送端重载：新 controller 新 sessionId，按 name+size 匹配已收会话，只补缺失', async () => {
@@ -518,7 +539,9 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     const ac = new AbortController()
     const { file, bytes } = bigSource()
     const p1 = a1.startSend([file], ac.signal)
-    await waitUntil(() => (sinkB.chunks.get('0:0')?.size ?? 0) >= CHUNKS_PER_BLOCK)
+    await waitUntil(() => t1.meta !== null)
+    const sid = t1.meta!.sessionId
+    await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
     ac.abort()
     t1.drain()
     await p1
@@ -546,16 +569,19 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
     const chunks2 = sent2.filter((s) => s.kind === 'chunk').map((s) => s.chunkIndex!)
     expect(chunks2).toHaveLength(300 - CHUNKS_PER_BLOCK)
     expect(chunks2[0]).toBe(CHUNKS_PER_BLOCK)
-    await waitUntil(() => sinkB.finalized.includes('0:0'))
-    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+    await waitUntil(() => sinkB.finalized.includes(`${sid}:0:0`))
+    await expect(sha256Hex(sinkB.mergePart(sid, 0, 0))).resolves.toBe(await sha256Hex(bytes))
   })
 
   it('part 校验失败：B 清位图 + part_reset → 重发 → 最终字节一致', async () => {
-    const { a, sinkB } = pair({ failOnce: true })
+    const { a, transportA, sinkB } = pair({ failOnce: true })
     const { file, bytes } = bigSource(CHUNK_SIZE * 2) // 小文件（2 chunk，1 块）
-    await a.startSend([file])
+    const p = a.startSend([file])
+    await waitUntil(() => transportA.meta !== null)
+    const sid = transportA.meta!.sessionId
+    await p
     await waitUntil(() => sinkB.finalized.length >= 2) // 第 1 次失败 + 第 2 次成功
-    await expect(sha256Hex(sinkB.mergePart(0, 0))).resolves.toBe(await sha256Hex(bytes))
+    await expect(sha256Hex(sinkB.mergePart(sid, 0, 0))).resolves.toBe(await sha256Hex(bytes))
   })
 
   it('位图持久化节流 ≤2s：块完成后延迟落盘', async () => {
@@ -566,10 +592,10 @@ describe('TransferController — 续传端到端（T06 主 seam）', () => {
       transportA.pauseAfter = 1 + CHUNKS_PER_BLOCK
       const p = a.startSend([file])
       // fake 时钟下轮询：advanceTimersByTimeAsync 同时 flush 微任务
-      for (let i = 0; i < 20_000 && (sinkB.chunks.get('0:0')?.size ?? 0) < CHUNKS_PER_BLOCK; i++) {
+      for (let i = 0; i < 20_000 && partChunkCount(sinkB, 0, 0) < CHUNKS_PER_BLOCK; i++) {
         await vi.advanceTimersByTimeAsync(0)
       }
-      expect(sinkB.chunks.get('0:0')?.size).toBe(CHUNKS_PER_BLOCK)
+      expect(partChunkCount(sinkB, 0, 0)).toBe(CHUNKS_PER_BLOCK)
       transportA.drain()
       await p
       // 未到节流周期（fake 时钟仍接近 0）：不落盘

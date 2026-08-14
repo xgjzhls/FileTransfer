@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Receiver } from './receiver'
 import { CHUNK_SIZE } from './sender'
 import { CHUNKS_PER_BLOCK, encodeBitfield } from './bitfield'
-import type { FileManifest } from '../storage/sessionStore'
+import type { SessionManifest } from '../storage/sessionStore'
 import type { MetaMessage, PartDoneMessage, ResumeManifestMessage } from '../protocol/transfer'
 
 const META: MetaMessage = {
@@ -143,6 +143,8 @@ describe('Receiver — 续传位图（T06）', () => {
     ],
   }
 
+  const RECORD = (files: SessionManifest['files']): SessionManifest => ({ sessionId: 'sess', createdAt: 1, lastActiveAt: 1, files })
+
   function resumeSetup() {
     const sink = new FakeSink()
     const controls: unknown[] = []
@@ -179,7 +181,7 @@ describe('Receiver — 续传位图（T06）', () => {
   })
 
   it('续传恢复：stored 记录（partial 位图）→ 初始化完整块并回应对应 resume_manifest', async () => {
-    const stored: FileManifest[] = [
+    const stored = RECORD([
       {
         fileId: 0,
         name: 'big.bin',
@@ -187,7 +189,7 @@ describe('Receiver — 续传位图（T06）', () => {
         partCount: 1,
         parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2), sha256: 'E' }],
       },
-    ]
+    ])
     const { sink, receiver, controls } = resumeSetup()
     receiver.onMeta(RESUME_META, stored)
     const manifest = controls.find((c) => (c as ResumeManifestMessage).type === 'resume_manifest') as ResumeManifestMessage
@@ -203,7 +205,7 @@ describe('Receiver — 续传位图（T06）', () => {
   })
 
   it('done part 的 stored 记录：resume_manifest 标 done，chunk 到达被忽略', async () => {
-    const stored: FileManifest[] = [
+    const stored = RECORD([
       {
         fileId: 0,
         name: 'big.bin',
@@ -211,7 +213,7 @@ describe('Receiver — 续传位图（T06）', () => {
         partCount: 1,
         parts: [{ index: 0, state: 'done', bitfield: '', sha256: 'E' }],
       },
-    ]
+    ])
     const { sink, receiver, controls } = resumeSetup()
     receiver.onMeta(RESUME_META, stored)
     const manifest = controls.find((c) => (c as ResumeManifestMessage).type === 'resume_manifest') as ResumeManifestMessage
@@ -221,7 +223,7 @@ describe('Receiver — 续传位图（T06）', () => {
   })
 
   it('sha256 不匹配（文件被改）：该文件不续传，触发 onResumeMismatch', () => {
-    const stored: FileManifest[] = [
+    const stored = RECORD([
       {
         fileId: 0,
         name: 'big.bin',
@@ -229,7 +231,7 @@ describe('Receiver — 续传位图（T06）', () => {
         partCount: 1,
         parts: [{ index: 0, state: 'partial', bitfield: encodeBitfield([0], 2), sha256: 'OLD-SHA' }],
       },
-    ]
+    ])
     const mismatch: string[] = []
     const sink = new FakeSink()
     const receiver = new Receiver(sink, () => {}, {
@@ -248,7 +250,7 @@ describe('Receiver — 续传位图（T06）', () => {
     for (let c = 0; c < CHUNKS_PER_BLOCK; c++) await receiver.onChunk(0, 0, c, new Uint8Array(CHUNK_SIZE))
     const writesAfterFirstRun = sink.writeChunk.mock.calls.length
     // 同 sessionId 重连（stored 为空记录——不应回退）
-    const stale: FileManifest[] = [
+    const stale = RECORD([
       {
         fileId: 0,
         name: 'big.bin',
@@ -256,7 +258,7 @@ describe('Receiver — 续传位图（T06）', () => {
         partCount: 1,
         parts: [{ index: 0, state: 'partial', bitfield: '', sha256: 'E' }],
       },
-    ]
+    ])
     receiver.onMeta(RESUME_META, stale)
     // 内存态保留：块 0 已完整，再收块 0 的 chunk 不重写
     await receiver.onChunk(0, 0, 0, new Uint8Array(1))

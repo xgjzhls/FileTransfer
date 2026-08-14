@@ -9,7 +9,7 @@
 import { encodeChunk } from './framing'
 import { PART_SIZE, planParts } from '../webrtc/transferMeta'
 import { blocksInPart, blockChunkRange, decodeBitfield } from './bitfield'
-import type { ResumeFileState } from '../protocol/transfer'
+import type { ResumeFileState, ResumePartState } from '../protocol/transfer'
 
 export const CHUNK_SIZE = 256 * 1024 - 64 // 256KiB 留帧头余量（13B 头 + payload ≤ maxMessageSize 262144）
 export const BACKPRESSURE_LIMIT = 8 * 1024 * 1024 // SPEC §3.1: >8MiB 暂停
@@ -81,10 +81,7 @@ export class Sender {
   }
 
   /** 本 run 要发送的 chunk 序列：done 跳过；partial 只取缺失块（块内整发）；无记录全发 */
-  private scheduleChunks(
-    partSize: number,
-    resumePart?: { state: string; bitfield: string },
-  ): number[] {
+  private scheduleChunks(partSize: number, resumePart?: ResumePartState): number[] {
     const chunkCount = Math.max(1, Math.ceil(partSize / this.chunkSize))
     if (resumePart?.state === 'done') return []
     if (!resumePart) return range(chunkCount)

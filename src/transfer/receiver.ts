@@ -21,7 +21,7 @@ import type {
   ResumePartState,
   TransferControlMessage,
 } from '../protocol/transfer'
-import type { FileManifest } from '../storage/sessionStore'
+import type { FileManifest, SessionManifest } from '../storage/sessionStore'
 
 /** 存储写入抽象：T02 StorageAdapter 的子集（UI 层适配） */
 export interface PartSink {
@@ -68,7 +68,7 @@ export class Receiver {
   private readonly events: ReceiverEvents
   private readonly onResumeChange?: (fileId: number, partIndex: number, done: boolean, bitfield: string) => void
   private files: Map<number, FileState> = new Map()
-  private sessionId = ''
+  private _sessionId = ''
   /** 每 part 一个串行写队列：DataChannel ordered:true 保证到达顺序，串行落盘避免并发 writer 交错 */
   private readonly queues = new Map<string, Promise<void>>()
 
@@ -86,16 +86,23 @@ export class Receiver {
 
   /**
    * meta：初始化文件/part 状态，并立即回应 resume_manifest（SPEC §3.4 步骤 2）。
-   * stored：持久化的续传记录（按 name+size 匹配、sha256 校验；同 sessionId 重连时
-   * 内存态优先，不重载）。回应后发送端只补发缺失块。
+   * record：持久化会话记录（按 sessionId 或 name+size 匹配；sha256 校验）。
+   * 同 sessionId 重连时内存态优先；发送端重载（新 sessionId 但匹配到旧记录）时
+   * **采用旧记录的 sessionId 作为存储目标**——已收数据在旧会话目录里，真块级续传。
    */
-  onMeta(meta: MetaMessage, stored?: FileManifest[]): void {
-    const sameSession = meta.sessionId === this.sessionId && this.files.size > 0
+  onMeta(meta: MetaMessage, record?: SessionManifest): void {
+    const sameSession = meta.sessionId === this._sessionId && this.files.size > 0
     if (!sameSession) {
-      this.sessionId = meta.sessionId
-      this.files = this.initFiles(meta, stored)
+      // 存储/导出目录沿用已有记录的 sessionId（发送端重载场景），否则用 meta 的
+      this._sessionId = record?.sessionId ?? meta.sessionId
+      this.files = this.initFiles(meta, record?.files)
     }
     this.sendControl(this.buildResumeManifest())
+  }
+
+  /** 当前存储/导出目录对应的 sessionId（发送端重载续传时可能 ≠ meta.sessionId） */
+  get sessionId(): string {
+    return this._sessionId
   }
 
   onChunk(fileId: number, partIndex: number, chunkIndex: number, payload: Uint8Array): Promise<void> {
@@ -218,6 +225,7 @@ export class Receiver {
 
   private blockComplete(part: PartState, block: number): boolean {
     const { start, end } = blockChunkRange(block, part.totalChunks)
+    if (start >= end) return false // 越界块（防御）：空区间不算完整
     for (let c = start; c < end; c++) {
       if (!part.received.has(c)) return false
     }

@@ -140,3 +140,10 @@
 - e2e 断连续传用例在本机（Clash fake-ip 无同机 ICE）降级跳过，需真机/无代理环境跑一次
 - 离线扫码续传（T07）未做：本票预留 resume 握手协议，离线路径复用同一 handshake
 - 发送端重载后「匹配失败提示」：name+size 不匹配 → 静默全发；sha256 不匹配 → onResumeMismatch 状态提示（已实现）
+- **接收端重载后对端是新 device id**：不自动连接新设备（防误连陌生人），需用户点一次「连接」——US-16 的「无需手动操作」指同对端重连（已自动）
+
+### 审查后修订（2026-08-14）
+- **发送端重载真块级续传**：接收端匹配到旧记录时采用其 sessionId 作为存储/导出目录（数据在旧目录）——不再经 part_reset 全量重下；消除幽灵会话（记录留在旧 sessionId 下原地更新）
+- MemorySink 改为按 sessionId 分 key（对齐真实 OPFS 分目录），发送端重载测试断言「只补缺失 + 字节一致」
+- Settings：续传按钮（回首页重新配对）+ ORPHAN_AGE_MS 复用 cleanup 常量
+- Home：localStorage 缓存写移出 state updater（StrictMode 纯度）；blockComplete 越界块防御；scheduleChunks 用 ResumePartState 类型
