@@ -46,10 +46,10 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 ```
 
 - `.env.development`：`VITE_SIGNALING_WSS=wss://192.168.10.26:8787/ws`（换机后若 IP 变化改这里）
-  - **2026-08-14 本机 IP 已变为 10.213.80.3**；`.env.development` 现指向 `wss://localhost:8787/ws`（e2e 用，证书 SAN 含 localhost 免证书问题）；**手机测试前需把 IP 改回局域网地址并重新生成证书（SAN 含新 IP）**，生成命令见 `.local-certs/` 记录
+  - **2026-08-14 本机 IP 已变为 10.213.80.3**，证书已重签（SAN 加入 10.213.80.3 + 198.18.0.1）；`.env.development` 现指向 `wss://10.213.80.3:8787/ws`，手机可直接用；e2e 若想免证书问题可临时改回 `wss://localhost:8787/ws`（SAN 含 localhost）
 - **手机访问前需信任 ca.crt**（`ca.crt` 在仓库 .local-certs/，发给手机安装 + 完全信任；一次性）
 - 电脑浏览器访问 https://localhost:8787 点「高级→继续前往」豁免一次，或 sudo 装 CA 到系统钥匙串
-- 证书 SAN：192.168.10.26 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/` 生成记录，或重新执行生成流程）
+- 证书 SAN：192.168.10.26 + 10.213.80.3 + 198.18.0.1 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/README.md`）
 
 ## 测试与验证
 - 单测：`npm test`（Vitest，130 个，含 storage/webrtc/transfer/signaling/server）
