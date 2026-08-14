@@ -178,6 +178,23 @@ describe('Room — evict 唤醒重建（T10 验收 2/3）', () => {
     expect(await storage.get(PRESENCE_PREFIX + 'b')).toBeUndefined()
   })
 
+  it('evict 后第一个事件是 close：同样清理 presence 并广播 peer_left', async () => {
+    const storage = new FakeStorage()
+    await joinTwo(storage)
+
+    // evict：新实例，第一个事件就是 socket 关闭（无任何消息触发过重建）
+    const c2 = new FakeCtx(storage)
+    const a = ws('a')
+    const b = ws('b')
+    c2.register(a, ['a'])
+    c2.register(b, ['b'])
+    const room2 = new Room(c2 as unknown as DurableObjectState, {} as unknown as Env)
+
+    await room2.webSocketClose(asWs(b), 1005, '', false)
+    expect(await storage.get(PRESENCE_PREFIX + 'b')).toBeUndefined()
+    expect(a.received.at(-1)).toEqual({ type: 'peer_left', peerId: 'b' })
+  })
+
   it('唤醒后同设备重连：新 socket 替换旧连接，旧连接 close hook 不误删 presence', async () => {
     const storage = new FakeStorage()
     const { a } = await joinTwo(storage)
@@ -262,6 +279,34 @@ describe('Room — 脏数据与持久化失败兜底（T10 验收 4）', () => {
     ctx.register(a, ['a'])
     await room.webSocketMessage(asWs(a), joinMsg(device('a')))
     expect(a.received.at(-1)).toEqual({ type: 'room_state', peers: [device('a')] })
+  })
+
+  it('storage.list 失败 + alarm：不回收房间（deleteAll 会抹掉存活设备 presence）', async () => {
+    const storage = new FakeStorage()
+    await storage.put(PRESENCE_PREFIX + 'a', device('a'))
+    storage.failList = true
+    const c = new FakeCtx(storage)
+    c.register(ws('a'), ['a']) // a 的 socket 存活
+    const room = new Room(c as unknown as DurableObjectState, {} as unknown as Env)
+
+    await room.alarm()
+    expect(storage.deletedAll).toBe(false) // 不回收
+    expect(storage.alarms.length).toBe(1) // 顺延
+  })
+
+  it('脏 presence 字段非法（老版本/损坏数据）：跳过并清理', async () => {
+    const storage = new FakeStorage()
+    await storage.put(PRESENCE_PREFIX + 'bad', { id: '', name: 42 }) // 非法形状
+    await storage.put(PRESENCE_PREFIX + 'b', device('b'))
+
+    const c = new FakeCtx(storage)
+    const b = ws('b')
+    c.register(b, ['b'])
+    const room = new Room(c as unknown as DurableObjectState, {} as unknown as Env)
+
+    await room.webSocketMessage(asWs(b), signalMsg('bad', { kind: 'offer', sdp: 'x' }))
+    expect(b.received.at(-1)).toEqual({ type: 'error', reason: 'peer not found' })
+    expect(await storage.get(PRESENCE_PREFIX + 'bad')).toBeUndefined() // 非法条目已清理
   })
 })
 

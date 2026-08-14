@@ -116,7 +116,8 @@ describe('RoomCore — join / presence', () => {
   })
 })
 
-describe('RoomCore — signal 转发', () => {  it('A→B：B 收到 {type:signal, from:A, payload}，A 自己不收', () => {
+describe('RoomCore — signal 转发', () => {
+  it('A→B：B 收到 {type:signal, from:A, payload}，A 自己不收', () => {
     const { core, join, conns } = setup()
     join(device('a'))
     join(device('b'))

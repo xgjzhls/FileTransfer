@@ -12,6 +12,11 @@ import type { DeviceInfo, PeerInfo, ServerMessage, SignalPayload } from '../../s
 
 export type { DeviceInfo, ServerMessage } from '../../src/protocol/signaling'
 
+/** 规整为 PeerInfo（只保留协议字段，防多余字段污染） */
+function toPeerInfo(d: DeviceInfo): PeerInfo {
+  return { id: d.id, name: d.name, kind: d.kind }
+}
+
 /** 连接抽象：DO 壳用 WebSocket 实现 */
 export interface PeerConnection {
   send(message: ServerMessage): void
@@ -44,7 +49,7 @@ export class RoomCore {
     const existing = this.peers.get(device.id)
     if (existing) {
       existing.conn.close()
-      existing.info = { id: device.id, name: device.name, kind: device.kind }
+      existing.info = toPeerInfo(device)
       existing.conn = conn
       conn.send({ type: 'room_state', peers: this.peerInfos() })
       return { kind: 'rejoined' }
@@ -54,7 +59,7 @@ export class RoomCore {
       conn.close(4004, 'room full')
       return { kind: 'full' }
     }
-    const info: PeerInfo = { id: device.id, name: device.name, kind: device.kind }
+    const info = toPeerInfo(device)
     this.peers.set(device.id, { info, conn })
     for (const [id, peer] of this.peers) {
       if (id !== device.id) peer.conn.send({ type: 'peer_joined', peer: info })
@@ -70,10 +75,7 @@ export class RoomCore {
    */
   restore(devices: Array<{ info: DeviceInfo; conn: PeerConnection }>): void {
     for (const { info, conn } of devices) {
-      this.peers.set(info.id, {
-        info: { id: info.id, name: info.name, kind: info.kind },
-        conn,
-      })
+      this.peers.set(info.id, { info: toPeerInfo(info), conn })
     }
   }
 

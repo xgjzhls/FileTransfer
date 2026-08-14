@@ -1,10 +1,10 @@
 # T10: DO presence 持久化 —— Hibernation evict 不丢房间状态
 
-- 状态：✅ 代码完成（server/src/roomDo.ts presence 持久化 + 唤醒重建；15 新单测）；验收 5 已用 miniflare 实例重建模拟 evict 验证
+- 状态：✅ 代码完成（server/src/roomDo.ts presence 持久化 + 唤醒重建；18 新单测）；验收 5 已用 miniflare 实例重建模拟 evict 验证
 - 阻塞：T03
 - 被阻塞者：T08（部署验收 / 多端真机联调）
 - 引用：SPEC §5.2；T04 已知问题 2
-- 完成备注：`npm test` 148/148；e2e 10/10（step 6 改为单端断开——B 不重连、presence 从 storage 恢复）；本地 smoke 8/8；详见文末「实现备注」
+- 完成备注：`npm test` 151/151；e2e 10/10（step 6 单端断开——B 不重连、presence 从 storage 恢复）；本地 smoke 8/8；详见文末「实现备注」
 
 ## 目标
 Durable Object 被 evict 后唤醒时，房间 presence（`deviceId → info` 及 WS 映射）不丢。当前 `RoomCore.peers`、`deviceByWs`、`wsByDevice` 全部只在内存，DO evict（WebSocket Hibernation 允许连接保留、内存清空）后唤醒时 core 为空：新设备 join 只见自己、老设备收不到广播 / 被 "join first" 拒绝。**部署环境必现，本地 wrangler dev 不 evict 所以测不出来。**
@@ -32,7 +32,14 @@ Durable Object 被 evict 后唤醒时，房间 presence（`deviceId → info` �
 
 ### 测试
 - `room.test.ts` +3：restore 不广播 / join·signal·leave 与未 evict 一致、同 id 覆盖、restore 后 leave
-- `roomDo.test.ts` 新 12 个（fake DurableObjectState 模拟 evict 唤醒）：join/leave 持久化与清理、唤醒后 signal 转发与 join 广播、唤醒后 leave、唤醒后同设备重连不误删 presence、restore 只建一次、脏数据清理、put/list 失败兜底、alarm 先重建不误删/空房间回收、deviceIdFromUrl
+- `roomDo.test.ts` 新 15 个（fake DurableObjectState 模拟 evict 唤醒）：join/leave 持久化与清理、唤醒后 signal 转发与 join 广播、唤醒后 leave、**evict 后首个事件是 close 也正确清理**、唤醒后同设备重连不误删 presence、restore 只建一次、脏数据（无 socket / 字段非法）清理、put/list 失败兜底、**list 失败 + alarm 不回收**、alarm 先重建不误删/空房间回收、deviceIdFromUrl
+
+### 健壮性（code-review 后补）
+- `webSocketClose` 也先 `restoreIfNeeded()`：evict 后首个事件是 close 时，leave 清理/peer_left 广播与未 evict 一致
+- `alarm` 在 restore 失败时只顺延不 deleteAll（避免抹掉存活设备 presence）；restore 失败标记不重试（注释说明）
+- 脏 presence 形状校验（id/name/kind 字符串），非法条目跳过并清理
+- 信任边界：`tagByWs` 记录 URL tag，join 时 device.id 与 tag 不一致 → warn（功能不受影响，仅唤醒恢复不可用）；无鉴权场景（房间码即凭证），恶意客户端可伪冒任意 id，此校验为防御性记录
+- SPEC §5.2「不落盘」句已修订：改为「只持久化 presence 元数据，不接触业务数据」
 
 ### 验证（验收 5）
 - 本地无法真 evict，用 **miniflare 实例重建**（T09 发现的怪癖：close + 新 fetch → 新 DO 实例、内存清空、socket 保留）近似：A 断线重连后，B **未重连**即恢复在线（presence 从 storage 重建）——T09 时代此场景 A 只见空房间，T10 修复

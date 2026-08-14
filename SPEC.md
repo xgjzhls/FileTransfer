@@ -105,7 +105,7 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 → signal      { "type":"signal", "to":"<peerId>", "payload":{ "kind":"offer"|"answer", "sdp":"<gzip+b64>" } }
 ```
 
-服务端职责：房间表（code → peers）、presence 广播、signal 转发。**不落盘、不接触业务数据**。房间码即凭证，无密码（ADR-0004）。
+服务端职责：房间表（code → peers）、presence 广播、signal 转发。**只持久化 presence 元数据（deviceId → 设备信息，供 DO evict 后重建，T10）；不接触业务数据**。房间码即凭证，无密码（ADR-0004）。
 
 ### 5.3 离线（QR）
 

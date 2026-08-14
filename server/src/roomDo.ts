@@ -33,6 +33,17 @@ export function deviceIdFromUrl(url: string): string | null {
   }
 }
 
+/** storage 中 presence 值的形状校验（防老版本/脏数据） */
+function isPeerInfo(value: unknown): value is PeerInfo {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.id === 'string' && v.id.length > 0 &&
+    typeof v.name === 'string' &&
+    typeof v.kind === 'string'
+  )
+}
+
 export interface Env {
   ROOMS: DurableObjectNamespace<Room>
 }
@@ -42,8 +53,12 @@ export class Room implements DurableObject, Rpc.DurableObjectBranded {
   private readonly core = new RoomCore(MAX_PEERS)
   private readonly deviceByWs = new Map<WebSocket, string>()
   private readonly wsByDevice = new Map<string, WebSocket>()
+  /** socket → URL 上的 device tag（accept 时记录，join 时校验一致性） */
+  private readonly tagByWs = new Map<WebSocket, string>()
   /** 本实例是否已从 storage 重建 presence（每个实例只建一次） */
   private restored = false
+  /** 本实例 presence 重建失败（storage 异常）：alarm 不再回收，避免误删 */
+  private restoreFailed = false
   protected readonly ctx: DurableObjectState
   protected readonly env: Env
 
@@ -61,6 +76,7 @@ export class Room implements DurableObject, Rpc.DurableObjectBranded {
     // deviceId 在 URL 上（join 消息到达前就必须打 tag；Hibernation tag 无法事后修改）
     const deviceId = deviceIdFromUrl(request.url)
     this.ctx.acceptWebSocket(server, deviceId ? [deviceId] : undefined)
+    if (deviceId) this.tagByWs.set(server, deviceId)
     return new Response(null, { status: 101, webSocket: client })
   }
 
@@ -105,6 +121,8 @@ export class Room implements DurableObject, Rpc.DurableObjectBranded {
   }
 
   async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+    // evict 后第一个事件可能是 close：先重建映射，leave 清理才能与未 evict 一致
+    await this.restoreIfNeeded()
     const deviceId = this.deviceByWs.get(ws)
     if (!deviceId) return
     this.deviceByWs.delete(ws)
@@ -120,6 +138,11 @@ export class Room implements DurableObject, Rpc.DurableObjectBranded {
   async alarm(): Promise<void> {
     // evict 后唤醒可能先到 alarm：先重建 presence 再判空，避免误删活跃房间
     await this.restoreIfNeeded()
+    if (this.restoreFailed) {
+      // 重建失败（storage 异常）：宁可顺延也不清空——deleteAll 会抹掉存活设备的 presence
+      this.ctx.storage.setAlarm(Date.now() + ROOM_TTL_MS)
+      return
+    }
     if (this.core.size === 0) {
       await this.ctx.storage.deleteAll()
     } else {
@@ -129,25 +152,32 @@ export class Room implements DurableObject, Rpc.DurableObjectBranded {
 
   /**
    * T10 唤醒重建：从 storage 恢复 presence → 重建 core / deviceByWs / wsByDevice。
-   * 脏数据（presence 在但对应 socket 已不在）跳过并清理；持久化失败兜底为空房间。
+   * 脏数据（presence 在但对应 socket 已不在，或字段非法）跳过并清理；
+   * 持久化失败兜底为空房间（restoreFailed，alarm 不再回收）。
    */
   private async restoreIfNeeded(): Promise<void> {
     if (this.restored) return
+    // 注意：置位在 await 之前——storage 瞬时故障不重试（本实例生命周期内按空房间处理）
     this.restored = true
     let entries: Map<string, unknown>
     try {
       entries = await this.ctx.storage.list({ prefix: PRESENCE_PREFIX })
     } catch (e) {
       console.error('[room] presence restore failed, start empty:', String(e))
+      this.restoreFailed = true
       return
     }
     for (const [key, value] of entries) {
       const deviceId = key.slice(PRESENCE_PREFIX.length)
-      const info = value as PeerInfo
+      const info = value as Partial<PeerInfo> | null
+      // 脏数据：presence 残留但连接已回收 / 字段非法（如老版本写入）→ 跳过并清理
+      if (!isPeerInfo(info)) {
+        void this.ctx.storage.delete(key).catch(() => {})
+        continue
+      }
       // 该设备必须有存活 socket（Hibernation tag 按 deviceId 打）才恢复
       const [ws] = this.ctx.getWebSockets(deviceId)
       if (!ws) {
-        // 脏数据：presence 残留但连接已回收（如 DO 迁移/连接异常关闭）
         void this.ctx.storage.delete(key).catch(() => {})
         continue
       }
@@ -158,6 +188,12 @@ export class Room implements DurableObject, Rpc.DurableObjectBranded {
   }
 
   private async handleJoin(ws: WebSocket, msg: Extract<ClientMessage, { type: 'join' }>): Promise<void> {
+    // 信任边界：URL tag（accept 时打的）应与 join 声明的 device.id 一致；
+    // 不一致说明客户端异常/旧版——join 照常（功能不受影响），仅唤醒恢复不可用
+    const tag = this.tagByWs.get(ws)
+    if (tag && tag !== msg.device.id) {
+      console.warn(`[room] join device ${msg.device.id} mismatches ws tag ${tag}`)
+    }
     const oldWs = this.wsByDevice.get(msg.device.id)
     if (oldWs && oldWs !== ws) {
       // 重连：core.join 会关闭旧连接；先解除旧映射，避免其 close hook 触发 leave
