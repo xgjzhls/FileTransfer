@@ -23,6 +23,6 @@
 ## 已知问题（2026-08-14 调查）
 - **现象**：经常看不到加入房间的人
 - **根因 1（本地主因）**：客户端无自动重连，`ws.on('close')` 即 `setPeers([])`（Home.tsx），且无手动重连入口 → wrangler dev 重启 / Clash 抖动 / 锁屏后设备列表永久空 → ✅ **已修（T09：ReconnectingSignalingClient 指数退避自动重连 + 重 join + 列表保留）**
-- **根因 2（部署必现）**：DO 用 WebSocket Hibernation API（`acceptWebSocket`）但 `RoomCore.peers` 仅存内存；DO evict 后唤醒时 core 为空 → 新设备 join 只见自己、老设备收不到广播 / 被 "join first" 拒绝 → 修复见 **T10**
+- **根因 2（部署必现）**：DO 用 WebSocket Hibernation API（`acceptWebSocket`）但 `RoomCore.peers` 仅存内存；DO evict 后唤醒时 core 为空 → 新设备 join 只见自己、老设备收不到广播 / 被 "join first" 拒绝 → ✅ **已修（T10：presence 持久化 + tags 重建）**
 - **根因 3（dev 抖动）**：React StrictMode 双挂载 → 刷新即 join→leave→join（`device.id` 每次 mount 重新生成）；放大部分场景，保持不动
-- **新发现（2026-08-14，T09 调查）**：wrangler dev 本地模式下，DO 实例在「WS close + 新 fetch」时被重建（miniflare 怪癖），内存 presence 丢失、老连接被静默丢弃（客户端收不到 close）→ A 断线后 B 在服务端消失但 B 不知情。生产无此问题；T10 的 presence 持久化亦覆盖此场景
+- **新发现（2026-08-14，T09 调查）**：wrangler dev 本地模式下，DO 实例在「WS close + 新 fetch」时被重建（miniflare 怪癖），内存 presence 丢失、老连接被静默丢弃（客户端收不到 close）→ A 断线后 B 在服务端消失但 B 不知情。✅ **已被 T10 的 presence 持久化缓解**：新实例从 storage 重建，A 重连后无需 B 重连即可恢复互见（e2e step 6 已验证）

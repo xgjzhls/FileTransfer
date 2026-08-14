@@ -63,6 +63,20 @@ export class RoomCore {
     return { kind: 'joined' }
   }
 
+  /**
+   * restore（T10 唤醒重建）：批量把已持久化的设备加回，不广播——
+   * 其余设备此前已在线，列表对彼此未变。同 id 重复 restore 用新连接覆盖。
+   * 调用方负责 socket 生命周期（连接是否存活由唤醒后的 getWebSockets 决定）。
+   */
+  restore(devices: Array<{ info: DeviceInfo; conn: PeerConnection }>): void {
+    for (const { info, conn } of devices) {
+      this.peers.set(info.id, {
+        info: { id: info.id, name: info.name, kind: info.kind },
+        conn,
+      })
+    }
+  }
+
   /** leave：向其余设备广播 peer_left；不存在的 leave 无效果 */
   leave(deviceId: string): LeaveResult {
     if (!this.peers.delete(deviceId)) return { kind: 'noop' }

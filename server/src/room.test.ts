@@ -116,8 +116,7 @@ describe('RoomCore — join / presence', () => {
   })
 })
 
-describe('RoomCore — signal 转发', () => {
-  it('A→B：B 收到 {type:signal, from:A, payload}，A 自己不收', () => {
+describe('RoomCore — signal 转发', () => {  it('A→B：B 收到 {type:signal, from:A, payload}，A 自己不收', () => {
     const { core, join, conns } = setup()
     join(device('a'))
     join(device('b'))
@@ -144,5 +143,65 @@ describe('RoomCore — signal 转发', () => {
     const payload = { kind: 'offer' as const, sdp: 'x' }
     expect(core.signal('outsider', 'a', payload)).toEqual({ kind: 'error' })
     expect(conns.get('a')!.received).toEqual([])
+  })
+})
+
+describe('RoomCore — restore（T10 唤醒重建）', () => {
+  it('restore 批量加入且不广播；随后 join 广播与 signal 转发与未 evict 一致', () => {
+    const core = new RoomCore(MAX_PEERS)
+    const connA = fakeConn()
+    const connB = fakeConn()
+    core.restore([
+      { info: device('a'), conn: connA },
+      { info: device('b'), conn: connB },
+    ])
+    // restore 本身不产生任何消息（设备列表对彼此未变）
+    expect(connA.received).toEqual([])
+    expect(connB.received).toEqual([])
+
+    // 新设备 join → 广播给已恢复设备
+    const connC = fakeConn()
+    expect(core.join(device('c'), connC)).toEqual({ kind: 'joined' })
+    expect(connA.received).toEqual([{ type: 'peer_joined', peer: device('c') }])
+    expect(connB.received).toEqual([{ type: 'peer_joined', peer: device('c') }])
+    expect(connC.received).toEqual([
+      { type: 'room_state', peers: [device('a'), device('b'), device('c')] },
+    ])
+
+    // signal 转发正常
+    const payload = { kind: 'offer' as const, sdp: 'v=0...' }
+    expect(core.signal('a', 'b', payload)).toEqual({ kind: 'forwarded' })
+    expect(connB.received.at(-1)).toEqual({ type: 'signal', from: 'a', payload })
+  })
+
+  it('restore 同 id 覆盖旧连接（唤醒后重连：新 socket 生效）', () => {
+    const core = new RoomCore(MAX_PEERS)
+    const connOld = fakeConn()
+    core.restore([{ info: device('a'), conn: connOld }])
+    const connNew = fakeConn()
+    core.restore([{ info: device('a'), conn: connNew }])
+    core.join(device('b'), fakeConn())
+    connOld.received.length = 0
+    connNew.received.length = 0
+
+    core.signal('a', 'b', { kind: 'offer', sdp: 'x' })
+    // 新连接收到（作为 from 时自己的转发目标验证用目标 b）
+    expect(connOld.received).toEqual([])
+    core.signal('b', 'a', { kind: 'answer', sdp: 'y' })
+    expect(connNew.received.at(-1)).toEqual({ type: 'signal', from: 'b', payload: { kind: 'answer', sdp: 'y' } })
+  })
+
+  it('restore 后 leave 清理与未 evict 一致', () => {
+    const core = new RoomCore(MAX_PEERS)
+    const connA = fakeConn()
+    const connB = fakeConn()
+    core.restore([
+      { info: device('a'), conn: connA },
+      { info: device('b'), conn: connB },
+    ])
+    connA.received.length = 0
+    expect(core.leave('b')).toEqual({ kind: 'left' })
+    expect(connA.received).toEqual([{ type: 'peer_left', peerId: 'b' }])
+    expect(core.size).toBe(1)
   })
 })

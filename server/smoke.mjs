@@ -21,9 +21,10 @@ function step(name, ok, detail = '') {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
-function openClient(room) {
+function openClient(room, deviceId = `smoke-${Math.random().toString(36).slice(2, 8)}`) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${wsOrigin}/ws?room=${room}`)
+    // URL 带 device：与服务端 Hibernation tag（T10）对齐
+    const ws = new WebSocket(`${wsOrigin}/ws?room=${room}&device=${deviceId}`)
     const queue = []
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)

@@ -239,7 +239,12 @@ export default function Home() {
     }
     setStatus(`正在连接信令服务，加入房间 ${code}…`)
     // 断线后由客户端自动重连并重新 join 原房间（指数退避 1s→30s，最多 10 次）
-    reconnectRef.current.connect(`${SIGNALING_WSS}?room=${code}`, code, device)
+    // URL 带 device 身份：服务端用它做 Hibernation tag（T10 evict 唤醒后重建 presence）
+    reconnectRef.current.connect(
+      `${SIGNALING_WSS}?room=${code}&device=${encodeURIComponent(device.id)}`,
+      code,
+      device,
+    )
   }
 
   /** 诊断：收集本机 WebRTC 候选 IP（连接失败时定位网络问题） */

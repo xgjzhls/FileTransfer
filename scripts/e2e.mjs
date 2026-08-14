@@ -146,28 +146,18 @@ try {
     step('（降级）WebRTC connected + 传输断言跳过', true, '环境不支持同机 ICE')
   }
 
-  // ── 6. 杀 WS → 自动重连 → 房间码/设备列表恢复（T09）
-  // 模拟信令服务重启：两端 WS 全断（hook 强制断开 A；B 亦断开）→ 两端指数退避
-  // 自动重连并重新 join 原房间 → 设备列表互相恢复。
-  // 注：wrangler dev 本地模式下，DO 实例在 WS close + 新 fetch 时被重建（内存
-  // presence 丢失），所以必须两端都重连才能验证「列表恢复」；生产无此问题。
+  // ── 6. 杀 WS → 自动重连 → 房间码/设备列表恢复（T09 + T10）
+  // T09：A 的 WS 被外力断开 → 指数退避自动重连 + 重新 join 原房间。
+  // T10：miniflare 在 close + 新 fetch 时重建 DO 实例（近似 evict）——B 的
+  // presence 从 storage 恢复，A 无需等 B 重连就重新看到 B；B 全程未断线。
   await pageA.evaluate(() => window.__ltSignaling?.forceDisconnect())
   await ctxA.setOffline(true) // A 离线：重连尝试失败 → 稳定停留在「重连中」态
-  await pageB.evaluate(() => window.__ltSignaling?.forceDisconnect())
   await pageA.waitForFunction(() => document.body.textContent?.includes('自动重连'), null, {
     timeout: 15000,
   })
   step('A 断开信令：UI 进入「自动重连」态', true)
   const peersDuring = await pageA.getByText('E2E-B').count()
   step('断线期间设备列表保留（非永久清空）', peersDuring > 0)
-  await pageB.waitForFunction(
-    () =>
-      document.body.textContent?.includes('已连接') &&
-      !document.body.textContent?.includes('重连中'),
-    null,
-    { timeout: 30000 },
-  )
-  step('B 自动重连成功', true)
   await ctxA.setOffline(false)
   await pageA.waitForFunction(
     () =>
@@ -182,7 +172,16 @@ try {
   step('A 恢复网络：信令自动重连成功', true)
   const roomBadgeAfter = pageA.locator('.badge', { hasText: '房间码：' })
   const roomAfter = (await roomBadgeAfter.textContent()).replace('房间码：', '').trim()
-  step('重连后房间码不丢、设备列表恢复（E2E-B 在线）', roomAfter === room, `room=${roomAfter}`)
+  // B 从未断线：presence 是从 storage 恢复的（T10），而非 B 重连
+  const bStillConnected = (await pageB.evaluate(() => document.body.textContent)).includes(
+    '信令：已连接',
+  )
+  const bSeesA = (await pageB.evaluate(() => document.body.textContent)).includes('未命名设备')
+  step(
+    '重连后房间码不丢、设备列表恢复（B 未断线，presence 已恢复）',
+    roomAfter === room && bStillConnected && bSeesA,
+    `room=${roomAfter}`,
+  )
 
   // ── 7. 无 JS 报错
   const errors = [...pageErrors.A, ...pageErrors.B]
