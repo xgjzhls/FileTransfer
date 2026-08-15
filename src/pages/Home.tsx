@@ -125,11 +125,6 @@ export default function Home() {
   const abortRef = useRef<AbortController | null>(null)
   const recvMetaRef = useRef<FileMeta[]>([])
 
-  // webkitdirectory 是 IDL 属性：ref 挂载后置位，保证 iOS/Android 选择器语义生效
-  useEffect(() => {
-    if (webkitDirRef.current) webkitDirRef.current.webkitdirectory = true
-  }, [])
-
   // T12：设备身份持久化（lt.deviceId）——重载后同一身份重连，旧 presence 不残留
   const device = useMemo(
     () => ({
@@ -877,7 +872,13 @@ export default function Home() {
                 onChange={onFilesSelected}
               />
               <input
-                ref={webkitDirRef}
+                // webkitdirectory 是 IDL 属性（非 HTML 属性）：必须在元素挂载时置位。
+                // 用 ref callback 而非 useEffect——传输区是连接后才渲染的条件分支，
+                // 首挂载 effect 时 input 还不存在，属性会永远落空（T18 手机端 bug）。
+                ref={(el) => {
+                  webkitDirRef.current = el
+                  if (el) el.webkitdirectory = true
+                }}
                 type="file"
                 multiple
                 style={{ display: 'none' }}

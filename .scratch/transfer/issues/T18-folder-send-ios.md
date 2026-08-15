@@ -27,7 +27,7 @@
 
 ## 备注
 
-- `webkitdirectory` 是 IDL 属性，用 ref 挂载后置位（`el.webkitdirectory = true`），JSX 属性方式不可靠
+- `webkitdirectory` 是 IDL 属性：用 **ref callback** 在元素每次挂载时置位（`el.webkitdirectory = true`），不能用首挂载 useEffect——传输区是连接后才渲染的条件分支，首挂载时 input 不存在，属性永远落空（T18 真机发现：手机端按钮出现但只能选文件；2026-08-15 修复）
 - 桌面 Chrome 维持 showDirectoryPicker 路径（有 `dirHandle.name` 展示），webkitdirectory 覆盖其余支持者（Android Chrome 一并受益）
 - zip 只做 method=0 store（用户拍板「不压缩」）：照片/视频已压缩无差、更快；文本/文档类 zip 偏大可接受
 - zip32 单条目上限 4GiB：>4GiB 的单文件（项目上限 10GB）不打包，提示逐文件导出；zip64 不在 v1
