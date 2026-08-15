@@ -17,6 +17,8 @@ import { walkDirectory, basename } from '../transfer/dirPicker'
 import { WakeLockManager } from '../wakelock/wakeLock'
 import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
+import { isValidPin, PIN_LENGTH, sanitizePin } from '../rooms/roomCode'
+import { clearLastRoom, getLastRoom, getOrCreateDeviceId, setLastRoom } from '../rooms/session'
 import OfflinePair from './OfflinePair'
 import type { FileMeta } from '../protocol/transfer'
 import type { DeviceKind, PeerInfo } from '../protocol/signaling'
@@ -69,7 +71,8 @@ interface RecvItem {
 export default function Home() {
   const [orphans, setOrphans] = useState<OrphanReport | null>(null)
   const [room, setRoom] = useState('')
-  const [joinInput, setJoinInput] = useState('')
+  /** T11：PIN 输入框内容（sanitize 后，仅 32 字母表字符）；输满 4 位自动加入 */
+  const [pinInput, setPinInput] = useState('')
   const [peers, setPeers] = useState<PeerInfo[]>([])
   const [connState, setConnState] = useState('idle')
   const [status, setStatus] = useState('')
@@ -111,9 +114,10 @@ export default function Home() {
   const abortRef = useRef<AbortController | null>(null)
   const recvMetaRef = useRef<FileMeta[]>([])
 
+  // T12：设备身份持久化（lt.deviceId）——重载后同一身份重连，旧 presence 不残留
   const device = useMemo(
     () => ({
-      id: crypto.randomUUID(),
+      id: getOrCreateDeviceId(),
       name: localStorage.getItem('lt.deviceName')?.trim() || '未命名设备',
       kind: detectKind(),
     }),
@@ -164,6 +168,27 @@ export default function Home() {
       delete (window as unknown as { __ltSignaling?: unknown }).__ltSignaling
     }
   }, [])
+
+  // T12：重开应用在线时自动加入上次的房间（lt.lastRoom）——「二次使用零操作」
+  useEffect(() => {
+    const last = getLastRoom()
+    if (!SIGNALING_WSS) return // 未配置信令：不自动回房（保留 lastRoom，配置后重开仍可用）
+    if (!last) return
+    if (!isValidPin(last)) {
+      clearLastRoom() // 非法残留码：清除，避免下次继续尝试
+      return
+    }
+    setStatus(`正在自动加入上次的房间 ${last}…`)
+    joinRoom(last)
+    // joinRoom 仅依赖 refs 与稳定 setter，首帧执行一次即可
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // T11：输满 4 位合法码 → 自动建房/加入（对称 PIN）；输入框仅接受 32 字母表字符
+  useEffect(() => {
+    if (isValidPin(pinInput) && pinInput !== roomRef.current) joinRoom(pinInput)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinInput])
 
   /** T08：是否有在途传输（发送/接收任一活跃）且连接在线 —— 驱动 Wake Lock 与界面提示 */
   const transferActive = useMemo(
@@ -306,7 +331,8 @@ export default function Home() {
     return managerRef.current
   }
 
-  async function createRoom() {
+  /** T11：随机生成一个合法房间码（POST /api/room）并填入输入框 → 自动加入 */
+  async function randomPin() {
     if (!SIGNALING_WSS) {
       setError('未配置信令服务（.env 的 VITE_SIGNALING_WSS）')
       return
@@ -317,8 +343,7 @@ export default function Home() {
       const res = await fetch(`${httpBaseOf(SIGNALING_WSS)}/api/room`, { method: 'POST' })
       if (!res.ok) throw new Error(`create room → ${res.status}`)
       const { room: code } = (await res.json()) as { room: string }
-      setRoom(code)
-      joinRoom(code)
+      setPinInput(code) // 合法 4 位 → 自动 join（见 pinInput effect）
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -326,7 +351,12 @@ export default function Home() {
     }
   }
 
+  /** T11：输码即建房/加入（对称 PIN，服务端零改动） */
   function joinRoom(code: string) {
+    // 客户端兜底：非法码直接忽略——避免触发 10 次无意义自动重连（服务端 ROOM_CODE_RE 兜底）
+    if (!isValidPin(code)) return
+    // T12：记住上次房间（重开应用自动回房）
+    setLastRoom(code)
     roomRef.current = code
     setRoom(code)
     setError('')
@@ -338,7 +368,7 @@ export default function Home() {
           setWsState(s)
           if (s === 'connected') setStatus(`已加入房间 ${roomRef.current}（信令已连接）`)
           else if (s === 'reconnecting') setStatus('信令连接断开，自动重连中…（设备列表可能不是最新）')
-          else if (s === 'offline') setStatus('信令离线：多次重连失败，请检查网络 / 信令服务后手动重试')
+          else if (s === 'offline') setStatus('信令离线：多次重连失败，请检查网络 / 信令服务后重试')
         },
       })
     }
@@ -593,33 +623,46 @@ export default function Home() {
       )}
 
       <section className="card">
-        <h2>房间</h2>
+        {/* T11：房间与设备卡片合并为「设备」视图 —— PIN 输入区 + 设备列表 + 点选连接 */}
+        <h2>设备（{peers.length} 台在线）</h2>
         {!SIGNALING_WSS && (
-          <p className="bad">未配置 VITE_SIGNALING_WSS（见 .env.example），信令不可用。</p>
+          <p className="bad">未配置 VITE_SIGNALING_WSS（见 .env.example），信令不可用——请使用下方「离线扫码配对」。</p>
         )}
         <div className="row">
           {room === '' ? (
             <>
-              <button onClick={createRoom} disabled={busy}>
-                创建房间
-              </button>
               <input
-                value={joinInput}
-                onChange={(e) => setJoinInput(e.target.value.toUpperCase())}
-                placeholder="输入房间码加入"
-                maxLength={4}
-                style={{ width: 140 }}
+                value={pinInput}
+                onChange={(e) => setPinInput(sanitizePin(e.target.value))}
+                placeholder="输入 4 位房间码（PIN）"
+                maxLength={PIN_LENGTH}
+                style={{ width: 170 }}
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && joinInput.length === 4) joinRoom(joinInput)
+                  if (e.key === 'Enter' && isValidPin(pinInput)) joinRoom(pinInput)
                 }}
               />
-              <button onClick={() => joinInput.length === 4 && joinRoom(joinInput)}>加入</button>
+              <button onClick={() => void randomPin()} disabled={busy}>
+                随机生成
+              </button>
             </>
           ) : (
             <span className="badge">房间码：{room}</span>
           )}
           <span className={`badge ${connState === 'connected' ? 'ok' : ''}`}>状态：{connState}</span>
         </div>
+        {room === '' && pinInput.length > 0 && pinInput.length < PIN_LENGTH && (
+          <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
+            继续输入至 {PIN_LENGTH} 位自动加入（仅限 2-9 与 A-Z，已自动剔除 0/O、1/I）
+          </p>
+        )}
+        {room !== '' && (
+          <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>
+            退出房间在「设置 → 房间」页（退出后下次打开不再自动回房）。
+          </p>
+        )}
         {status && <p>{status}</p>}
         {error && <p className="bad">{error}</p>}
         {wsState === 'reconnecting' && (
@@ -627,7 +670,7 @@ export default function Home() {
         )}
         {wsState === 'offline' && (
           <p className="bad">
-            信令离线：自动重连已放弃。
+            信令离线：自动回房已放弃。请检查网络 / 信令服务后重试，或使用下方「离线扫码配对」。
             <button
               onClick={() => reconnectRef.current?.retry()}
               style={{ marginLeft: 8, padding: '2px 10px' }}
@@ -659,21 +702,21 @@ export default function Home() {
             mDNS 名（xxx.local）依赖路由器组播解析；198.18.x.x 是 Clash fake-ip。
           </p>
         </details>
-      </section>
 
-      <section className="card">
-        <h2>设备（{peers.length} 台在线）</h2>
         {peers.length === 0 && room !== '' && (
           <p className="muted">等待其他设备输入房间码 {room} 加入…</p>
         )}
         {peers.length === 0 && room === '' && (
-          <p className="muted">创建或加入房间后显示同房间设备。</p>
+          <p className="muted">
+            输入房间码（PIN）或「随机生成」一个码分享给对方，同码设备会出现在这里；重开应用自动回到上次的房间。
+          </p>
         )}
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
           {peers.map((peer) => (
             <li key={peer.id} className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
               <span>
-                {peer.name} <span className="muted">({peer.kind})</span>
+                <span className="ok" style={{ marginRight: 6 }}>●</span>
+                {peer.name} <span className="muted">({peer.kind} · 在线)</span>
               </span>
               <button
                 onClick={() => void connectTo(peer.id)}

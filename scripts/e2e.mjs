@@ -1,9 +1,13 @@
 #!/usr/bin/env node
 /**
- * E2E 点击测试（Playwright）—— 房间 → 发现 → WebRTC 连接 → 文件传输。
+ * E2E 点击测试（Playwright）—— PIN 房间 → 发现 → WebRTC 连接 → 文件传输。
  *
  * 用法：node scripts/e2e.mjs [baseURL]   （默认 http://localhost:5173）
  * 前置：dev server 已启动（npm run dev）；.env 已配 VITE_SIGNALING_WSS。
+ *
+ * 覆盖：T11 对称 PIN（随机生成 / 输码即加入 / 双页互见 / 点选连接）、
+ * T12 记住房间（重载自动回房 / 身份稳定 / 新会话自动回房）、T06 续传、
+ * T13 离线扫码（免选角色直接扫码）、T09/T10 断线重连 + presence 恢复。
  *
  * WebRTC 环境探测：Clash TUN + fake-ip（198.18.x.x）会劫持 host candidate，
  * 同机 WebRTC 自连不可行。探测失败时自动降级——只验证 UI 流程与信令
@@ -66,6 +70,19 @@ async function waitFinalConnState(page, timeoutMs) {
     if (Date.now() - t0 > timeoutMs) return s
     await page.waitForTimeout(250)
   }
+}
+
+/** 读取页面「房间码：X」徽章；不存在返回 '' */
+async function readRoomBadge(page) {
+  const badge = page.locator('.badge', { hasText: '房间码：' })
+  if ((await badge.count()) === 0) return ''
+  return (await badge.textContent()).replace('房间码：', '').trim()
+}
+
+/** 输入 4 位 PIN：fill 触发 input 事件 → 输满 4 位自动加入（T11 输即加入） */
+async function joinRoomByPin(page, code) {
+  await page.getByPlaceholder('输入 4 位房间码（PIN）').fill(code)
+  await page.locator('.badge', { hasText: '房间码：' }).waitFor({ timeout: 20000 })
 }
 
 const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS })
@@ -149,33 +166,31 @@ try {
     page.on('pageerror', (e) => pageErrors[name].push(e.message))
   }
 
-  // ── 1. A 创建房间（曾报错的步骤：CORS）
+  // ── 1. T11 A 随机生成房间码（POST /api/room → 填入输入框 → 自动加入）
   await pageA.goto(BASE)
-  await pageA.getByRole('button', { name: '创建房间' }).click()
-  const roomBadge = pageA.locator('.badge', { hasText: '房间码：' })
-  await roomBadge.waitFor({ timeout: 20000 })
-  const room = (await roomBadge.textContent()).replace('房间码：', '').trim()
-  step('A 点「创建房间」显示房间码', /^[2-9A-HJ-NP-Z]{4}$/.test(room), room)
+  await pageA.getByRole('button', { name: '随机生成' }).click()
+  await pageA.locator('.badge', { hasText: '房间码：' }).waitFor({ timeout: 20000 })
+  const room = await readRoomBadge(pageA)
+  step('T11 A 随机生成房间码并自动加入', /^[2-9A-HJ-NP-Z]{4}$/.test(room), room)
 
-  // ── 2. B 输码加入
+  // ── 2. T11 B 输同码 → 输满 4 位自动建房/加入（对称 PIN，无「创建/加入」之分）
   await pageB.goto(BASE)
-  await pageB.getByPlaceholder('输入房间码加入').fill(room)
-  await pageB.getByRole('button', { name: '加入' }).click()
-  await pageB.locator('.badge', { hasText: '房间码：' }).waitFor({ timeout: 20000 })
-  step('B 输码加入成功', true, room)
+  await joinRoomByPin(pageB, room)
+  const roomB = await readRoomBadge(pageB)
+  step('T11 B 输码即加入（无需先创建/选择角色）', roomB === room, roomB)
 
-  // ── 3. A 设备列表出现 B
+  // ── 3. T11 A 设备列表出现 B（同码互见）
   await pageA.waitForFunction(() => document.body.textContent?.includes('E2E-B'), null, {
     timeout: 20000,
   })
-  step('A 设备列表出现 B', true)
+  step('T11 双页输入同码：A 设备列表出现 B', true)
 
-  // ── 4. A 点连接 → 两端 connected（修复 gather 后连接很快，不中途等 signaling）
+  // ── 4. T11 A 点连接 → 两端 connected（修复 gather 后连接很快，不中途等 signaling）
   await pageA.getByRole('button', { name: '连接' }).click()
   if (webrtcOk) {
     await waitStatus(pageA, 'connected')
     await waitStatus(pageB, 'connected')
-    step('A 点连接：两端状态 connected', true)
+    step('T11 A 点连接：两端状态 connected', true)
 
     // ── 5. A 选文件发送 → B 接收完成（B 端显示「导出」按钮）
     await pageA.setInputFiles('input[type="file"]', srcPath)
@@ -188,11 +203,13 @@ try {
     // 信令往返快时 signaling 可能一闪而过直接到 connecting：两者都算「连接进行中」
     await waitStatusAny(pageA, ['signaling', 'connecting'])
     await waitStatusAny(pageB, ['signaling', 'connecting'])
-    step('（降级）A 点连接：两端进入 signaling/connecting（offer/answer 已交换）', true)
+    step('（降级）T11 A 点连接：两端进入 signaling/connecting（offer/answer 已交换）', true)
     step('（降级）WebRTC connected + 传输断言跳过', true, '环境不支持同机 ICE')
   }
 
-  // ── 5.5 T06：传输中途杀接收端页面 → 自动恢复 → 文件完整（续传）
+  // ── 5.5+5.6 T06/T12：断连续传 + 重载自动回房 + 身份稳定
+  // T12 断言（自动回房/身份稳定/新会话回房）不依赖 WebRTC，始终执行；
+  // T06 断连续传仅在 WebRTC 可用时执行（接收端重载即上文这次 reload）
   if (webrtcOk) {
     const srcResume = join(dir, 'e2e-resume.bin')
     writeFileSync(srcResume, randomBytes(20 * 1024 * 1024)) // 20 MiB（给中断留时间）
@@ -203,12 +220,58 @@ try {
       timeout: 30000,
     })
     await pageB.waitForTimeout(2500)
-    // 杀 B：重载页面（内存态丢失，IndexedDB manifest 保留）→ 重新入房
-    await pageB.reload()
-    await pageB.getByPlaceholder('输入房间码加入').fill(room)
-    await pageB.getByRole('button', { name: '加入' }).click()
-    await pageB.locator('.badge', { hasText: '房间码：' }).waitFor({ timeout: 20000 })
-    // A 的对端换成新 device id（peer_left + peer_joined）；等 A 的「连接」按钮可点
+  }
+
+  // T12：重载 → 自动 join 上次房间（lt.lastRoom），无需手动输码
+  await pageB.reload()
+  const roomBAfterReload = await readRoomBadge(pageB)
+  step('T12 B 重载后自动回房（无需手动输入）', roomBAfterReload === room, roomBAfterReload)
+  // 同一 deviceId（lt.deviceId）重连：A 设备列表仅一条 E2E-B（无幽灵重复条目）
+  await pageA.waitForFunction(() => document.body.textContent?.includes('E2E-B'), null, {
+    timeout: 20000,
+  })
+  await pageA.waitForTimeout(800) // 等 peer_joined/peer_left 全部落定
+  const bEntries = await pageA.evaluate(() => {
+    return [...document.querySelectorAll('li')].filter((li) => li.textContent?.includes('E2E-B')).length
+  })
+  step('T12 身份稳定：A 设备列表仅一条 E2E-B（无幽灵广播）', bEntries === 1, `条目数=${bEntries}`)
+  // 新会话（新 context，preload lt.lastRoom）重开应用 → 自动回房（「重开零操作」）
+  const ctxC = await browser.newContext({ ignoreHTTPSErrors: true })
+  await ctxC.addInitScript(
+    (lastRoom) => {
+      localStorage.setItem('lt.lastRoom', lastRoom)
+      localStorage.setItem('lt.deviceName', 'E2E-C')
+    },
+    room,
+  )
+  const pageC = await ctxC.newPage()
+  await pageC.goto(BASE)
+  const roomC = await readRoomBadge(pageC)
+  step('T12 新会话（重开应用）自动回房', roomC === room, roomC)
+  await pageA.waitForFunction(() => document.body.textContent?.includes('E2E-C'), null, {
+    timeout: 20000,
+  })
+  step('T12 自动回房后设备列表恢复（A 看到 E2E-C）', true)
+  await pageC.close()
+  await ctxC.close()
+
+  // T12 设置页「退出房间」入口（SPEC §6.7）：清 lt.lastRoom → 回首页不再自动回房
+  await pageA.getByRole('link', { name: '设置' }).click()
+  await pageA.getByText('当前房间：').waitFor({ timeout: 10000 })
+  const roomCardText = (await pageA.locator('.card').filter({ hasText: '当前房间：' }).textContent()) ?? ''
+  step('T12 设置页显示当前房间', roomCardText.includes(room), room)
+  await pageA.getByRole('button', { name: '退出房间' }).click()
+  await pageA.getByText('未记住房间').waitFor({ timeout: 10000 })
+  step('T12 设置页「退出房间」清除记住的房间', true)
+  await pageA.getByRole('link', { name: '首页' }).click()
+  await pageA.getByPlaceholder('输入 4 位房间码（PIN）').waitFor({ timeout: 10000 })
+  const roomBadgeAfterExit = await pageA.locator('.badge', { hasText: '房间码：' }).count()
+  step('T12 退出房间后回首页不自动回房（回到 PIN 输入）', roomBadgeAfterExit === 0)
+  // 重新加入 QVZB（后续 T13 离线配对 / T09 断线重连依赖 A 在房间）
+  await joinRoomByPin(pageA, room)
+
+  if (webrtcOk) {
+    // T06：A 的对端同 id 重连后等「连接」按钮可点，重新连接 → 自动续传
     await pageA.waitForFunction(
       () => {
         const btn = [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === '连接')
@@ -228,7 +291,7 @@ try {
     step('（降级）T06 断连续传断言跳过', true, '环境不支持同机 ICE')
   }
 
-  // ── 5.7 T07：离线二维码配对（粘贴 fallback 全流程，数据面不经信令）
+  // ── 5.7 T13：离线二维码配对（免选角色：接收端直接扫码 → 按码型自动判定）
   // SDP 生成/交换不依赖 ICE 成功，降级模式也执行；仅 connected/传输断言需要真 WebRTC
   await pageA.getByRole('button', { name: '离线扫码配对' }).click()
   await pageA.getByRole('button', { name: '我是发送端（显示配对码）' }).click()
@@ -236,11 +299,11 @@ try {
     timeout: 30000,
   })
   const offerText = await pageA.evaluate(() => window.__ltQr.getOfferText())
-  step('T07 A 生成发送端配对码', offerText.length > 0, `${offerText.length} 字符`)
+  step('T13 A 生成发送端配对码', offerText.length > 0, `${offerText.length} 字符`)
 
-  // B（接收端）粘贴 offer → 生成 answer 配对码
+  // B（接收端）不再选角色：直接「扫码配对」→ 粘贴 offer → 自动进入 answer 流程
   await pageB.getByRole('button', { name: '离线扫码配对' }).click()
-  await pageB.getByRole('button', { name: '我是接收端（扫码配对）' }).click()
+  await pageB.getByRole('button', { name: '扫码配对' }).click()
   await pageB.getByText('没有摄像头？手动粘贴发送端的配对码').click()
   await pageB.getByPlaceholder('粘贴或输入配对码文本').fill(offerText)
   await pageB.getByRole('button', { name: '应用' }).click()
@@ -248,7 +311,7 @@ try {
     timeout: 30000,
   })
   const answerText = await pageB.evaluate(() => window.__ltQr.getAnswerText())
-  step('T07 B 粘贴 offer 并生成接收端回码', answerText.length > 0, `${answerText.length} 字符`)
+  step('T13 接收端免选角色直接扫码：识别 offer 自动生成回码', answerText.length > 0, `${answerText.length} 字符`)
 
   // A 粘贴 answer（两端完成 SDP 交换）
   await pageA.getByText('没有摄像头？手动粘贴接收端的配对码').click()
@@ -257,7 +320,7 @@ try {
   if (webrtcOk) {
     await waitStatus(pageA, 'connected')
     await waitStatus(pageB, 'connected')
-    step('T07 A 粘贴 answer：两端离线 connected', true)
+    step('T13 A 粘贴 answer：两端离线 connected', true)
 
     // 离线路径传文件（复用同一数据面）
     const qrPath = join(dir, 'e2e-qr.bin')
@@ -267,14 +330,14 @@ try {
     await pageB.waitForFunction(() => document.body.textContent?.includes('e2e-qr.bin'), null, {
       timeout: 60000,
     })
-    step('T07 离线配对后传输完成（B 显示文件）', true, '2 MiB')
+    step('T13 离线配对后传输完成（B 显示文件）', true, '2 MiB')
   } else {
     // 连接能力以实际结果为准：等状态脱离 signaling（connected / failed / 卡在 connecting）
     const finalState = await waitFinalConnState(pageA, 25000)
     // 降级环境（无 ICE）下 pc 会停在 connecting：SDP 已成功应用即为本步目标
     const exchangeDone = ['connected', 'failed', 'connecting'].includes(finalState)
     step(
-      '（降级）T07 SDP 交换完成（offer/answer 均已应用）',
+      '（降级）T13 SDP 交换完成（offer/answer 均已应用）',
       exchangeDone,
       `最终状态 ${finalState || '未知'}；本机 ICE 不可达，跳过 connected/传输断言`,
     )
@@ -304,8 +367,7 @@ try {
     timeout: 15000,
   })
   step('A 恢复网络：信令自动重连成功', true)
-  const roomBadgeAfter = pageA.locator('.badge', { hasText: '房间码：' })
-  const roomAfter = (await roomBadgeAfter.textContent()).replace('房间码：', '').trim()
+  const roomAfter = await readRoomBadge(pageA)
   // B 从未断线：presence 是从 storage 恢复的（T10），而非 B 重连
   const bStillConnected = (await pageB.evaluate(() => document.body.textContent)).includes(
     '信令：已连接',

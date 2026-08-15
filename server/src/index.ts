@@ -11,12 +11,13 @@
 
 import { Room } from './roomDo'
 import type { Env } from './roomDo'
-import { generateRoomCode } from './roomCode'
+import { generateRoomCode, ROOM_CODE_ALPHABET, ROOM_CODE_LENGTH } from './roomCode'
 
 export { Room }
 export type { Env }
 
-const ROOM_CODE_RE = /^[2-9A-HJ-NP-Z]{4}$/
+// 从字母表派生，避免第二处手写正则漂移（客户端另有同字母表，见 roomCode.test 交叉校验）
+const ROOM_CODE_RE = new RegExp(`^[${ROOM_CODE_ALPHABET}]{${ROOM_CODE_LENGTH}}$`)
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

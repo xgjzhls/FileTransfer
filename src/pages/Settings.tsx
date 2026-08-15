@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { clearAllData, cleanupOrphans, ORPHAN_AGE_MS } from '../storage/cleanup'
 import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '../storage'
 import type { OrphanReport } from '../storage'
+import { clearLastRoom, getLastRoom } from '../rooms/session'
 
 const DEVICE_NAME_KEY = 'lt.deviceName'
 
@@ -30,9 +31,13 @@ export default function Settings() {
   const [scanError, setScanError] = useState('')
   const [busy, setBusy] = useState(false)
   const [clearResult, setClearResult] = useState('')
+  // T12：记住的房间（设置页「退出房间」入口）
+  const [lastRoom, setLastRoom] = useState('')
+  const [roomMsg, setRoomMsg] = useState('')
 
   useEffect(() => {
     setName(localStorage.getItem(DEVICE_NAME_KEY) ?? '')
+    setLastRoom(getLastRoom())
     void refreshOrphans()
   }, [])
 
@@ -146,6 +151,13 @@ export default function Settings() {
     }
   }
 
+  /** T12：退出房间 —— 清 lt.lastRoom；回首页不再自动回房（首页卸载时信令已断开） */
+  function handleLeaveRoom() {
+    clearLastRoom()
+    setLastRoom('')
+    setRoomMsg('已退出房间：下次打开首页不会自动加入该房间')
+  }
+
   return (
     <>
       <h1>设置</h1>
@@ -162,6 +174,26 @@ export default function Settings() {
           <button onClick={handleSave}>{saved ? '已保存 ✓' : '保存'}</button>
         </div>
         <p className="muted">设备名会显示在配对列表中。</p>
+      </section>
+
+      <section className="card">
+        <h2>房间</h2>
+        {lastRoom ? (
+          <div className="row" style={{ justifyContent: 'space-between' }}>
+            <span>
+              当前房间：<span className="badge">{lastRoom}</span>
+              <span className="muted" style={{ marginLeft: 8 }}>
+                （打开首页自动加入）
+              </span>
+            </span>
+            <button onClick={handleLeaveRoom} style={{ padding: '2px 10px' }}>
+              退出房间
+            </button>
+          </div>
+        ) : (
+          <p className="muted">未记住房间：打开首页后输入房间码即可加入，重开应用自动回房。</p>
+        )}
+        {roomMsg && <p className="ok">{roomMsg}</p>}
       </section>
 
       <section className="card">

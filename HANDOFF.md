@@ -8,16 +8,16 @@
 
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
-- 分支：`main`（T01-T10 代码完成，另含**文件夹发送（SPEC §6.3）**与**传输前容量预警（SPEC §4）**；267 单测 + e2e 14/14（降级））；`prototype/storage-spike`（只读参考，勿动）
-- **T01-T10 代码全部完成 + 文件夹发送 + 容量预警**；**下一步：T08 真机验收（多端联调 + 照片门控实测 + 体验走查 + 文件夹发送/容量预警真机验证），验收即 v1**
+- 分支：`main`（T01-T13 代码完成，另含**文件夹发送（SPEC §6.3）**与**传输前容量预警（SPEC §4）**；293 单测 + e2e 21/21（降级））；`prototype/storage-spike`（只读参考，勿动）
+- **T01-T13 代码全部完成 + 文件夹发送 + 容量预警 + 对称 PIN（T11）+ 记住房间（T12）+ 离线扫码打磨（T13）**；**下一步：T08 真机验收（多端联调 + 照片门控实测 + 体验走查 + 文件夹发送/容量预警真机验证），验收即 v1**
 
 ## 已有产物
 | 路径 | 内容 |
 |---|---|
 | `CONTEXT.md` / `SPEC.md` | 约束词汇 / 正式规格（v1 定稿） |
-| `decisions/adr/0001-0005` | 架构决策 |
-| `.scratch/transfer/issues/T01-T10` | 实现票；T01-T05 状态已更新，T09/T10 为新开修复票 |
-| `src/` | 前端：`pages/`(Home/Settings/Spike/**OfflinePair**) + `qr/`(**qrCodec/qrRender/qrScan**) + `protocol/`(信令+传输消息类型) + `signaling/`(WS 客户端) + `webrtc/`(RtcPeer/ConnectionManager/sdpCodec/diagnostics) + `transfer/`(Sender/Receiver/Controller/framing/export) + `storage/`(OPFS 引擎+Worker+adapter+SessionStore+cleanup) |
+| `decisions/adr/0001-0006` | 架构决策（0006：对称 PIN 发现与配对，已接受） |
+| `.scratch/transfer/issues/T01-T13` | 实现票；T01-T13 状态已更新（T11/T12/T13 为新开票，本次完成） |
+| `src/` | 前端：`pages/`(Home/Settings/Spike/**OfflinePair**) + `qr/`(**qrCodec/qrRender/qrScan/scanRoute/scanErrors**) + `rooms/`(**roomCode/session**) + `protocol/`(信令+传输消息类型) + `signaling/`(WS 客户端) + `webrtc/`(RtcPeer/ConnectionManager/sdpCodec/diagnostics) + `transfer/`(Sender/Receiver/Controller/framing/export) + `storage/`(OPFS 引擎+Worker+adapter+SessionStore+cleanup) |
 | `server/` | CF Worker 信令：index(路由)+roomDo(DO)+roomCore(纯逻辑)+roomCode；`smoke.mjs` |
 | `scripts/` | `e2e.mjs`（Playwright 点击测试）、`bench.mjs`（传输测速） |
 | `.local-certs/` | 自签测试证书（**已入库**，新设备直接用；server.key 为测试私钥） |
@@ -25,11 +25,11 @@
 | `docs/` | Pages 构建产物（main 分支 /docs，用户已设 Pages 源） |
 
 ## 当前进度与下一步
-- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ T06 ✅ T07 ✅ **T08 ✅ 代码完成**）
+- 流程位置：grill-with-docs → SPEC → to-tickets → **实现中**（T01 ✅ T02 ✅ T03 ✅+部署 ✅ T04 ✅ T05 ✅ T09 ✅ T10 ✅ T06 ✅ T07 ✅ T08 ✅ 代码完成 **T11 ✅ T12 ✅ T13 ✅**）
 - **下一步：T08 真机验收（多端联调 + 照片门控阈值实测 + 体验走查），验收即 v1**
-- 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07 ✅；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
-- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、T06 断连续传（e2e 桌面已绿，真机未验）、**T07 验收 6（两部 iPhone / iPhone+Mac 纯局域网扫码配对传输）**
-- `npm test` 267/267 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）降级 14/14（本机 ICE 不可达时：仅 UI + 信令 + T07 SDP 交换）；全量 15/15 需 Clash 退出
+- 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07 ✅；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）；T11 → T12（前置 ✅）；T13 独立 ✅
+- 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、T06 断连续传（e2e 桌面已绿，真机未验）、**T07 验收 6（两部 iPhone / iPhone+Mac 纯局域网扫码配对传输）**、**T12 待真机项（iOS Safari 独立 PWA 后台恢复/重载自动回房）**、**T11/T13 全量 WebRTC e2e（需退出 Clash）**
+- `npm test` 293/293 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）降级 21/21（本机 ICE 不可达时：仅 UI + 信令 + T11/T12/T13 断言 + T07 SDP 交换）；全量 21/21（含 connected/传输/续传断言）需 Clash 退出
 
 ## 本地测试环境（全本地，绕开 Cloudflare 网络问题）——关键
 用户网络：DNS 被 Clash fake-ip 劫持（198.18.x.x），不开系统代理/TUN 无法直连 Cloudflare；**开发测试一律走本地信令**：
@@ -53,11 +53,11 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - 证书 SAN：192.168.10.26 + 10.213.80.3 + 198.18.0.1 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/README.md`）
 
 ## 测试与验证
-- 单测：`npm test`（Vitest，267 个，含 storage/webrtc/transfer/signaling/server/wakelock/dirPicker/**capacity**）
-- **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→T06 断连续传→**T07 离线 QR 配对+传输**→杀 WS 重连→无 JS 错；WebRTC 环境双页探测自动降级）
+- 单测：`npm test`（Vitest，293 个，含 storage/webrtc/transfer/signaling/server/wakelock/dirPicker/capacity/**rooms(PIN/会话)**/**qr(扫码路由/错误文案)**）
+- **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（T11 随机生成/输码即加入/双页互见/点选连接 → 传文件 → T06 断连续传 → **T12 重载自动回房+身份稳定+新会话回房+设置页退出** → **T13 离线 QR 免选角色配对+传输** → 杀 WS 重连 → 无 JS 错；WebRTC 环境双页探测自动降级）
   - e2e 默认走代理 `http://127.0.0.1:7890`（Clash），**Clash 退出后必须 E2E_NO_PROXY=1**
   - headless chromium 需 WebRTC 参数（脚本内置）：`--disable-features=WebRtcHideLocalIpsWithMdns --force-webrtc-ip-handling-policy=default_public_and_private_interfaces --allow-loopback-ice`
-  - **本机 Clash TUN 干扰同机 ICE 时自动降级**（仅 UI+信令+T07 SDP 交换断言）；彻底退出 Clash 后恢复全量（历史 15/15 全量通过记录）
+  - **本机 Clash TUN 干扰同机 ICE 时自动降级**（仅 UI+信令+T07 SDP 交换断言，当前 21/21）；彻底退出 Clash 后恢复全量（历史 15/15 全量通过记录）
 - **测速**：`E2E_NO_PROXY=1 node scripts/bench.mjs https://localhost:5173 300`（300MiB，实测 ~30 MiB/s）
 - 线上信令冒烟：`HTTPS_PROXY=http://127.0.0.1:7890 node server/smoke.mjs https://localtransfer-signaling.dirichray.workers.dev`（8/8）
 
@@ -72,6 +72,9 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - **信令 WS URL 带 `?device=<uuid>`（T10）**：服务端 `acceptWebSocket` 用它打 Hibernation tag（evict 后重建 presence）；老客户端不带也能用（无 tag → 不跨 evict 恢复）。消息格式（SPEC §5.2）未动
 - **续传（T06）**：64MiB 位图（256 帧/块）在接收端，节流 ≤2s 写 IndexedDB；发送端 meta 后等 resume_manifest 再发（只补缺失块）；DataChannel 断开自动重建并续传；「设置」页可删未完成会话。注意 e2e 断连续传用例需真 WebRTC（本机 Clash fake-ip 无同机 ICE 会降级跳过）
 - **离线二维码（T07）**：`src/qr/`（qrCodec 信封 v1 + qrRender + qrScan）+ `pages/OfflinePair.tsx`；发送端生成配对码（gzip+b64 的 {v:1,kind,sdp}）→ 接收端扫码/粘贴 → 接收端显示回码 → 发送端扫码/粘贴 → 建连（完全离线，数据面复用）；配对码实测 666-671 字符（上限 2800）；摄像头需 HTTPS 安全上下文；电脑无摄像头用「手动粘贴配对码文本」（双向）。e2e 用 `window.__ltQr` 钩子（DEV 仅）读配对码文本走粘贴路径
+- **对称 PIN（T11）**：`src/rooms/roomCode.ts` 客户端 32 字母表约束（sanitize 剔除 0/O/1/I + 小写转大写）；输满 4 位自动 join + 回车可提交；「随机生成」= `POST /api/room` 填输入框（自动触发 join）；房间/设备卡片已合并为「设备」视图。客户端字母表与服务端 `ROOM_CODE_ALPHABET` 有交叉校验测试防漂移；服务端 `ROOM_CODE_RE` 由字母表派生（index.ts）
+- **记住房间（T12）**：`src/rooms/session.ts`——`lt.deviceId`（重载同一身份，服务端 join 同 id 幂等替换连接，无幽灵广播）+ `lt.lastRoom`（重开自动回房；Home 首帧 effect join，需 `VITE_SIGNALING_WSS` 已配置，非法残留码自动清除）。「退出房间」在设置页（清 lastRoom；Home 路由卸载时信令自然断开——**注意：设置页停留期间 Home 未挂载，WS 已断，离开房间语义天然成立**）
+- **离线扫码打磨（T13）**：`src/qr/scanRoute.ts`（码型→角色自动路由）+ `scanErrors.ts`（cameraErrorText 补齐 OverconstrainedError/mediaDevices 缺失）；OfflinePair 去掉「我是接收端」角色选择，直接「扫码配对」按码型判定；扫码失败（解码失败/码型不符）提示节流 + 扫码器保持运行可重扫；「配对成功」反馈用 pairedRef 门控（在线连接完成时不误报误收起）
 - **e2e WebRTC 探测改为双页真实交换**：旧同页 loopback 在 Clash fake-ip TUN 下误判；双页（贴近真实双设备）探测可用时全量断言（传输/续传/QR 配对+传输），不可用降级为 UI+信令断言（含 T07 SDP 交换）
 - 照片门控 <300MiB（`PHOTO_GATE_BYTES`）；导出有「下载到本机」（Blob，>2GB 慎用）与「导出（分享）」
 - **Wake Lock（T08）**：`navigator.wakeLock` 仅 iOS 17+/新版 Chrome 支持；传输活跃且连接在线才持有，断连/取消即释放（避免一直常亮耗电）；iOS 切后台自动释放锁，回前台自动重取（`src/wakelock/wakeLock.ts`）；不支持时 UI 提示降级
