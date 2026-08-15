@@ -16,9 +16,13 @@
  * - 扫码失败（解码失败 / 码型与当前角色不符）→ 明确提示 + 扫码器保持运行可重扫
  * - 错误文案按场景区分（权限 / 无摄像头 / 占用 / 参数 / 非安全上下文）
  * - 配对成功明确反馈 + 自动收起
+ *
+ * T14 设备分工（SPEC §5.3）：按设备类型给默认主路径——电脑（无摄像头）默认
+ * 「显示配对码」、手机/平板默认「扫码」，pick 页三步引导（电脑显示 → 手机扫屏
+ * → 回码经微信/文件发回电脑粘贴），两向均可手动切换。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { decodeQrText, encodeQrText } from '../qr/qrCodec'
 import { renderQrToCanvas } from '../qr/qrRender'
 import { startQrScanner } from '../qr/qrScan'
@@ -26,8 +30,11 @@ import type { QrScannerHandle } from '../qr/qrScan'
 import { routeScannedCode } from '../qr/scanRoute'
 import type { ScanPhase } from '../qr/scanRoute'
 import { cameraErrorText } from '../qr/scanErrors'
+import { pairButtonLabels, pairGuide, primaryPairAction } from '../qr/pairGuide'
+import { detectKind } from '../device'
 import type { ConnectionManager } from '../webrtc/connection'
 import type { SignalPayload } from '../protocol/signaling'
+import type { DeviceKind } from '../protocol/signaling'
 
 type Phase = 'pick' | 'offer-show' | 'scan-wait' | 'answer-show' | 'done'
 
@@ -36,11 +43,18 @@ interface OfflinePairProps {
   manager: () => ConnectionManager
   /** 当前连接状态（Home 的 connState；配对成功自动收起面板） */
   connState: string
+  /** 本端设备类型（T14 分工默认主路径；Home 传入与设备上报一致的值，缺省自检） */
+  deviceKind?: DeviceKind
 }
 
-export default function OfflinePair({ manager, connState }: OfflinePairProps) {
+export default function OfflinePair({ manager, connState, deviceKind }: OfflinePairProps) {
   const [open, setOpen] = useState(false)
   const [phase, setPhase] = useState<Phase>('pick')
+  // T14 设备分工：本端默认主路径与引导文案（手机扫码 / 电脑出码）
+  const kind = useMemo(() => deviceKind ?? detectKind(), [deviceKind])
+  const primary = primaryPairAction(kind)
+  const guide = pairGuide(kind)
+  const buttonLabels = pairButtonLabels(kind)
   const [offerText, setOfferText] = useState('')
   const [answerText, setAnswerText] = useState('')
   const [pasteInput, setPasteInput] = useState('')
@@ -173,7 +187,11 @@ export default function OfflinePair({ manager, connState }: OfflinePairProps) {
       const text = await encodeQrText(payload)
       offerTextRef.current = text
       setOfferText(text)
-      setMsg('让接收端扫描此码；扫码后把对方的回码给我（扫码或粘贴）。')
+      setMsg(
+        kind === 'desktop'
+          ? '已生成配对码：手机扫此码后，把手机显示的回码文本发回本机粘贴。'
+          : '让接收端扫描此码；扫码后把对方的回码给我（扫码或粘贴）。',
+      )
       setPhase('offer-show')
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -194,7 +212,7 @@ export default function OfflinePair({ manager, connState }: OfflinePairProps) {
     const text = await encodeQrText(answer)
     answerTextRef.current = text
     setAnswerText(text)
-    setMsg('配对码已识别：请让发送端扫描下方二维码（或粘贴其文本）。')
+    setMsg('配对码已识别：请让对端扫描下方二维码，或复制文本发给对端粘贴。')
     setPhase('answer-show')
   }
 
@@ -266,7 +284,8 @@ export default function OfflinePair({ manager, connState }: OfflinePairProps) {
         )}
       </div>
       <p className="muted" style={{ fontSize: 12 }}>
-        无信令服务时的配对：发送端先显示配对码 → 接收端直接扫码（自动判定角色）→ 接收端显示回码 → 发送端扫码。数据仍是局域网 P2P 直连。
+        无信令服务时的配对，按设备分工：电脑端默认「显示配对码」（免摄像头），手机端默认「扫码」；
+        手机↔手机仍是一台显示、一台扫码。数据仍是局域网 P2P 直连。
       </p>
 
       {!open ? (
@@ -282,18 +301,35 @@ export default function OfflinePair({ manager, connState }: OfflinePairProps) {
           {err && <p className="bad">{err}</p>}
 
           {phase === 'pick' && (
-            <div className="row">
-              <button onClick={() => void generateOffer()}>我是发送端（显示配对码）</button>
-              <button
-                onClick={() => {
-                  setErr('')
-                  setMsg('')
-                  setPhase('scan-wait')
-                  setScanning(true)
-                }}
-              >
-                扫码配对
-              </button>
+            <div>
+              <p className="muted" style={{ fontSize: 12 }}>{guide.headline}</p>
+              <ol style={{ fontSize: 12, color: 'var(--muted)', margin: '4px 0 10px', paddingLeft: 18 }}>
+                {guide.steps.map((s, i) => (
+                  <li key={i} style={{ margin: '2px 0' }}>
+                    {s}
+                  </li>
+                ))}
+              </ol>
+              <div className="row">
+                <button
+                  onClick={() => void generateOffer()}
+                  style={primary === 'scan' ? { order: 2 } : undefined}
+                >
+                  {buttonLabels.offerLabel}
+                </button>
+                <button
+                  onClick={() => {
+                    setErr('')
+                    setMsg('')
+                    setPhase('scan-wait')
+                    setScanning(true)
+                  }}
+                  style={primary === 'offer' ? { order: 2 } : undefined}
+                >
+                  {buttonLabels.scanLabel}
+                </button>
+              </div>
+              <p className="muted" style={{ fontSize: 11 }}>{guide.note}</p>
             </div>
           )}
 
@@ -329,12 +365,23 @@ export default function OfflinePair({ manager, connState }: OfflinePairProps) {
                 </button>
                 {copyMsg && <span className="ok" style={{ fontSize: 12 }}>{copyMsg}</span>}
               </div>
-              <details style={{ marginTop: 8 }}>
-                <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
-                  没有摄像头？手动粘贴接收端的配对码
-                </summary>
-                <PasteBox value={pasteInput} onChange={setPasteInput} onSubmit={() => void applyPaste()} />
-              </details>
+              {kind === 'desktop' ? (
+                <div style={{ marginTop: 8 }}>
+                  <p className="muted" style={{ fontSize: 12 }}>手机发来的回码粘贴到这里：</p>
+                  <PasteBox
+                    value={pasteInput}
+                    onChange={setPasteInput}
+                    onSubmit={() => void applyPaste()}
+                  />
+                </div>
+              ) : (
+                <details style={{ marginTop: 8 }}>
+                  <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
+                    没有摄像头？手动粘贴接收端的配对码
+                  </summary>
+                  <PasteBox value={pasteInput} onChange={setPasteInput} onSubmit={() => void applyPaste()} />
+                </details>
+              )}
             </>
           )}
 

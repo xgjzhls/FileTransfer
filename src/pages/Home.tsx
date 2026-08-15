@@ -21,7 +21,8 @@ import { isValidPin, PIN_LENGTH, sanitizePin } from '../rooms/roomCode'
 import { clearLastRoom, getLastRoom, getOrCreateDeviceId, setLastRoom } from '../rooms/session'
 import OfflinePair from './OfflinePair'
 import type { FileMeta } from '../protocol/transfer'
-import type { DeviceKind, PeerInfo } from '../protocol/signaling'
+import type { PeerInfo } from '../protocol/signaling'
+import { detectKind } from '../device'
 
 /** 信令服务地址（.env 注入，T03 部署；形如 wss://host/ws） */
 const SIGNALING_WSS = import.meta.env.VITE_SIGNALING_WSS ?? ''
@@ -37,14 +38,6 @@ const WS_STATE_LABEL: Record<SignalingConnState, string> = {
 
 function httpBaseOf(wssUrl: string): string {
   return wssUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://').replace(/\/ws$/, '')
-}
-
-function detectKind(): DeviceKind {
-  const ua = navigator.userAgent
-  if (/iPad|Macintosh/.test(ua) && navigator.maxTouchPoints > 0) return 'tablet'
-  if (/iPhone|Android/.test(ua) && /Mobile/.test(ua)) return 'phone'
-  if (/Android/.test(ua)) return 'tablet'
-  return 'desktop'
 }
 
 interface SendItem {
@@ -734,7 +727,7 @@ export default function Home() {
       </section>
 
       {/* T07：离线二维码配对（无信令服务时；建连后完全复用在线数据面） */}
-      <OfflinePair manager={() => ensureManager()} connState={connState} />
+      <OfflinePair manager={() => ensureManager()} connState={connState} deviceKind={device.kind} />
 
       <section className="card">
         <h2>传输</h2>

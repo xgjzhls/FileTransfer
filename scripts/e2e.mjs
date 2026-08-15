@@ -291,17 +291,18 @@ try {
     step('（降级）T06 断连续传断言跳过', true, '环境不支持同机 ICE')
   }
 
-  // ── 5.7 T13：离线二维码配对（免选角色：接收端直接扫码 → 按码型自动判定）
+  // ── 5.7 T13/T14：离线二维码配对（免选角色 + 设备分工：电脑出码、手机扫码）
   // SDP 生成/交换不依赖 ICE 成功，降级模式也执行；仅 connected/传输断言需要真 WebRTC
   await pageA.getByRole('button', { name: '离线扫码配对' }).click()
-  await pageA.getByRole('button', { name: '我是发送端（显示配对码）' }).click()
+  // A（桌面 UA）默认主路径即「显示配对码（免摄像头）」——直接点主按钮
+  await pageA.getByRole('button', { name: /显示配对码/ }).click()
   await pageA.waitForFunction(() => (window.__ltQr?.getOfferText().length ?? 0) > 0, null, {
     timeout: 30000,
   })
   const offerText = await pageA.evaluate(() => window.__ltQr.getOfferText())
-  step('T13 A 生成发送端配对码', offerText.length > 0, `${offerText.length} 字符`)
+  step('T14 A 电脑端显示配对码', offerText.length > 0, `${offerText.length} 字符`)
 
-  // B（接收端）不再选角色：直接「扫码配对」→ 粘贴 offer → 自动进入 answer 流程
+  // B（接收端）：桌面次要路径「扫码配对」→ 粘贴 offer → 自动进入 answer 流程
   await pageB.getByRole('button', { name: '离线扫码配对' }).click()
   await pageB.getByRole('button', { name: '扫码配对' }).click()
   await pageB.getByText('没有摄像头？手动粘贴发送端的配对码').click()
@@ -313,8 +314,7 @@ try {
   const answerText = await pageB.evaluate(() => window.__ltQr.getAnswerText())
   step('T13 接收端免选角色直接扫码：识别 offer 自动生成回码', answerText.length > 0, `${answerText.length} 字符`)
 
-  // A 粘贴 answer（两端完成 SDP 交换）
-  await pageA.getByText('没有摄像头？手动粘贴接收端的配对码').click()
+  // A 粘贴 answer（T14 电脑端回码粘贴框常驻，无需展开 details；两端完成 SDP 交换）
   await pageA.getByPlaceholder('粘贴或输入配对码文本').fill(answerText)
   await pageA.getByRole('button', { name: '应用' }).click()
   if (webrtcOk) {
