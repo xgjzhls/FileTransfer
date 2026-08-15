@@ -15,7 +15,7 @@ import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
 import { walkDirectory, filesFromWebkitDirectory, basename } from '../transfer/dirPicker'
 import type { PickedDirFile } from '../transfer/dirPicker'
-import { groupTopLevel, shareNames, uniqueZipPaths, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
+import { groupTopLevel, shareNames, sumBytes, uniqueZipPaths, disambiguateRootVsDir, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
 import type { FolderGroup } from '../transfer/folderExport'
 import { buildZip, ZIP_MIME } from '../transfer/zip'
 import type { ZipEntry } from '../transfer/zip'
@@ -110,6 +110,8 @@ export default function Home() {
   const [recvItems, setRecvItems] = useState<RecvItem[]>([])
   const [exportMsg, setExportMsg] = useState('')
   const [sessionId, setSessionId] = useState('')
+  /** T20：接收文件多选勾选（仅 done 可勾，跨组批量导出）；新会话清空 */
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set())
   // SPEC §4 容量预警：接收前异步检查（estimate 优先 / iOS 探测），不阻塞接收
   const [capacity, setCapacity] = useState<{ level: 'info' | 'warn'; message: string } | null>(null)
   /** 容量检查代际：新 meta 使旧检查结果作废（竞态守卫） */
@@ -257,6 +259,7 @@ export default function Home() {
                 totalChunks: Math.max(1, Math.ceil(f.size / CHUNK_SIZE)),
               })),
             )
+            setSelectedIds(new Set()) // T20：新会话清空勾选
             setStatus(`收到 ${files.length} 个文件的清单，开始接收`)
             // 容量预警（SPEC §4）：estimate 可靠时精确判定，iOS 走写探测；
             // 充足（level ok）静默，不足/无法预检时提示（接收不阻断）
@@ -780,8 +783,132 @@ export default function Home() {
 
   const orphanCount = orphans?.orphans.length ?? 0
 
+  // T20：勾选总大小守卫（与分组导出文案对齐）
+  function guardSelectedBytes(totalBytes: number): boolean {
+    if (totalBytes > ZIP_TOTAL_GUARD_BYTES) {
+      setExportMsg(`选中内容共 ${formatBytes(totalBytes)}，超过 1GiB 打包上限，请分批或逐文件导出`)
+      return true
+    }
+    return false
+  }
+
+  /** T20：导出选中 zip（跨组打包，deflate level 6；分享/下载路由同分组 zip） */
+  async function exportSelectedZip() {
+    if (selectedItems.length === 0) return
+    if (guardSelectedBytes(sumBytes(selectedItems))) return
+    setExportMsg(`正在压缩选中文件为 zip…`)
+    try {
+      // 跨组勾选：目录优先消歧（根散文件撞目录名）+ 同全路径去重（T20 评审修正）
+      const paths = disambiguateRootVsDir(selectedItems)
+      const entries: ZipEntry[] = []
+      for (const it of selectedItems) {
+        entries.push({ path: paths.get(it)!, data: await readMergedOf(it) })
+      }
+      const blob = await buildZip(entries)
+      const zipName = '选中文件.zip'
+      if (CAN_SHARE_FILES && !HAS_FSA_PICKER) {
+        try {
+          const file = new File([blob], zipName, { type: ZIP_MIME })
+          await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+          setExportMsg(`已分享 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
+          return
+        } catch (shareErr) {
+          if ((shareErr as Error).name === 'AbortError') return
+          if ((shareErr as Error).name === 'NotAllowedError' || (shareErr as Error).name === 'SecurityError') {
+            downloadBlob(blob, zipName)
+            setExportMsg(`分享不可用，已改为下载 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
+            return
+          }
+          throw shareErr
+        }
+      }
+      downloadBlob(blob, zipName)
+      setExportMsg(`已下载 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
+  /** T20：导出选中到指定文件夹（桌面 FSA，保持相对路径，无需解压） */
+  async function exportSelectedToDir() {
+    if (selectedItems.length === 0) return
+    if (typeof window.showDirectoryPicker !== 'function') {
+      setExportMsg('此浏览器不支持选目标文件夹（需桌面 Chrome/Edge）；可用「导出选中 zip」后经「文件」App 选位置')
+      return
+    }
+    if (guardSelectedBytes(sumBytes(selectedItems))) return
+    setExportMsg('选择目标文件夹…')
+    try {
+      const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
+      setExportMsg(`正在导出 ${selectedItems.length} 个文件到「${dirHandle.name}」…`)
+      // 目录优先消歧：根散文件与目录首段同名时 FSA 建文件/建目录冲突会抛错（T20 评审修正）
+      const paths = disambiguateRootVsDir(selectedItems)
+      for (const it of selectedItems) {
+        await writeFileTree(dirHandle, paths.get(it)!, await readMergedOf(it))
+      }
+      setExportMsg(`已导出 ${selectedItems.length} 个文件到「${dirHandle.name}」（目录结构保留，无需解压）`)
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
+  /** T20：批量分享选中（手机；子目录拍平，shareNames 消歧） */
+  async function exportSelectedShare() {
+    if (selectedItems.length === 0) return
+    if (guardSelectedBytes(sumBytes(selectedItems))) return
+    setExportMsg('正在拼接文件…')
+    try {
+      const names = shareNames(selectedItems)
+      const files: File[] = []
+      for (const it of selectedItems) {
+        const shareName = names.get(it)!
+        const bytes = await readMergedOf(it)
+        files.push(new File([bytes.buffer as ArrayBuffer], shareName, { type: guessMime(shareName) }))
+      }
+      await navigator.share({ files, title: '选中文件', text: '存储到文件（多个文件收进一个文件夹，子目录拍平）' })
+      setExportMsg(`已批量分享 ${selectedItems.length} 个文件（分享面板选「存储到文件」）`)
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') return
+      if ((e as Error).name === 'NotAllowedError' || (e as Error).name === 'SecurityError') {
+        setExportMsg('分享不可用（权限受限）：桌面端请用「导出 zip」下载或「导出到文件夹…」')
+        return
+      }
+      setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   // SPEC §4：接收文件按顶层目录分组（文件夹发送 → 结构保持导出单元）
   const folderGroups = useMemo(() => groupTopLevel(recvItems), [recvItems])
+
+  // T20：勾选派生 —— 仅 done 文件可勾可导出；receiving → done 后自动可勾
+  const selectedItems = useMemo(
+    () => recvItems.filter((it) => it.status === 'done' && selectedIds.has(it.id)),
+    [recvItems, selectedIds],
+  )
+  const allDoneSelected = useMemo(() => {
+    const doneIds = recvItems.filter((it) => it.status === 'done').map((it) => it.id)
+    return doneIds.length > 0 && doneIds.every((id) => selectedIds.has(id))
+  }, [recvItems, selectedIds])
+
+  function toggleSelected(id: number): void {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function toggleSelectAll(): void {
+    setSelectedIds(
+      allDoneSelected
+        ? new Set()
+        : new Set(recvItems.filter((it) => it.status === 'done').map((it) => it.id)),
+    )
+  }
 
   return (
     <>
@@ -995,6 +1122,22 @@ export default function Home() {
                     {capacity.message}
                   </p>
                 )}
+                {selectedItems.length > 0 && (
+                  <div className="row" style={{ flexWrap: 'wrap', rowGap: 4, margin: '6px 0' }}>
+                    <span className="muted">
+                      已选 {selectedItems.length} 项 · {formatBytes(sumBytes(selectedItems))}
+                    </span>
+                    <button onClick={toggleSelectAll}>{allDoneSelected ? '取消全选' : '全选'}</button>
+                    <button onClick={() => setSelectedIds(new Set())}>清空</button>
+                    {HAS_FSA_PICKER && (
+                      <button onClick={() => void exportSelectedToDir()}>导出选中到文件夹…</button>
+                    )}
+                    <button onClick={() => void exportSelectedZip()}>导出选中 zip</button>
+                    {CAN_SHARE_FILES && !HAS_FSA_PICKER && (
+                      <button onClick={() => void exportSelectedShare()}>批量分享选中</button>
+                    )}
+                  </div>
+                )}
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {folderGroups.map((g) => {
                     // 根目录组（散文件多选发送，name 无 /）：单独显示也可批量导出
@@ -1030,9 +1173,22 @@ export default function Home() {
                   {recvItems.map((it) => (
                     <li key={it.id} style={{ margin: '8px 0' }}>
                       <div className="row" style={{ justifyContent: 'space-between' }}>
-                        <span>
-                          {it.name} <span className="muted">({formatBytes(it.size)})</span>
-                        </span>
+                        {it.status === 'done' ? (
+                          <label className="row" style={{ gap: 6, minWidth: 0 }}>
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(it.id)}
+                              onChange={() => toggleSelected(it.id)}
+                            />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {it.name} <span className="muted">({formatBytes(it.size)})</span>
+                            </span>
+                          </label>
+                        ) : (
+                          <span>
+                            {it.name} <span className="muted">({formatBytes(it.size)})</span>
+                          </span>
+                        )}
                         {it.status === 'done' ? (
                           <div className="row">
                             <button onClick={() => void exportFile(it, 'share')}>导出（分享）</button>

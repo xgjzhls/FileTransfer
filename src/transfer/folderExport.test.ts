@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { groupTopLevel, shareNames, uniqueZipPaths, ZIP_TOTAL_GUARD_BYTES } from './folderExport'
+import { groupTopLevel, shareNames, uniqueZipPaths, ZIP_TOTAL_GUARD_BYTES, sumBytes, disambiguateRootVsDir } from './folderExport'
 import type { FolderExportItem } from './folderExport'
 
 const item = (name: string, size = 1): FolderExportItem => ({ name, size })
@@ -80,6 +80,21 @@ describe('uniqueZipPaths — zip/目录导出重名去重', () => {
     expect(m.get(b)).toBe('photos/b.txt')
   })
 
+  it('T20 跨组勾选：不同目录同名 + 根目录同名互不冲突（全路径去重）', () => {
+    const root = item('a.jpg')
+    const photos = item('photos/a.jpg')
+    const docs = item('docs/a.jpg')
+    const img1 = item('IMG_0001.JPG')
+    const img2 = item('IMG_0001.JPG')
+    const m = uniqueZipPaths([root, photos, docs, img1, img2])
+    expect(m.get(root)).toBe('a.jpg')
+    expect(m.get(photos)).toBe('photos/a.jpg')
+    expect(m.get(docs)).toBe('docs/a.jpg')
+    expect(m.get(img1)).toBe('IMG_0001.JPG')
+    expect(m.get(img2)).toBe('IMG_0001.JPG (2)')
+    expect(new Set(m.values()).size).toBe(5) // 全部唯一
+  })
+
   it('同名文件（多选发送）：追加序号，结构不变，各条目独立', () => {
     const a = item('IMG_0001.JPG')
     const b = item('IMG_0001.JPG')
@@ -106,5 +121,48 @@ describe('uniqueZipPaths — zip/目录导出重名去重', () => {
 describe('ZIP_TOTAL_GUARD_BYTES — 导出守卫常量', () => {
   it('1 GiB', () => {
     expect(ZIP_TOTAL_GUARD_BYTES).toBe(1024 * 1024 * 1024)
+  })
+})
+
+describe('sumBytes — 勾选条目总大小（T20 批量导出守卫）', () => {
+  it('累加 size', () => {
+    expect(sumBytes([item('a.txt', 100), item('b.txt', 50), item('c.txt', 0)])).toBe(150)
+  })
+
+  it('空列表 → 0', () => {
+    expect(sumBytes([])).toBe(0)
+  })
+})
+
+describe('disambiguateRootVsDir — 根散文件 vs 目录名冲突消歧（T20 跨组 FSA/zip 导出）', () => {
+  it('根散文件名撞目录首段：目录优先，散文件追加序号', () => {
+    const rootFile = item('photos')
+    const inDir = item('photos/a.jpg')
+    const m = disambiguateRootVsDir([rootFile, inDir])
+    expect(m.get(rootFile)).toBe('photos (2)')
+    expect(m.get(inDir)).toBe('photos/a.jpg')
+  })
+
+  it('同名根散文件照常去重（多选同名）', () => {
+    const a = item('IMG_0001.JPG')
+    const b = item('IMG_0001.JPG')
+    const m = disambiguateRootVsDir([a, b])
+    expect(m.get(a)).toBe('IMG_0001.JPG')
+    expect(m.get(b)).toBe('IMG_0001.JPG (2)')
+  })
+
+  it('跨组混合：目录文件不动、根散文件不撞目录时原样、撞目录 + 重名共存仍全唯一', () => {
+    const rootA = item('photos')
+    const rootB = item('photos')
+    const a = item('a.jpg')
+    const photos = item('photos/a.jpg')
+    const docs = item('docs/a.jpg')
+    const m = disambiguateRootVsDir([rootA, rootB, a, photos, docs])
+    expect(m.get(rootA)).toBe('photos (2)')
+    expect(m.get(rootB)).toBe('photos (3)')
+    expect(m.get(a)).toBe('a.jpg')
+    expect(m.get(photos)).toBe('photos/a.jpg')
+    expect(m.get(docs)).toBe('docs/a.jpg')
+    expect(new Set(m.values()).size).toBe(5) // 全部唯一
   })
 })

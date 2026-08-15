@@ -54,6 +54,7 @@
 - 引导：接受「每台设备联网打开一次」（方案 A 隐含）
 - DataChannel：ordered:true + reliable（v1；[v2] unordered）→ ADR-0005
 - 文件夹发送（T18/T19）：iOS Safari 18.4+ / Android Chrome 用 `webkitdirectory` 选文件夹（桌面 Chrome 维持 File System Access）；接收端导出三种——「导出 zip（deflate level 6 均衡压缩，保留目录结构）」/「导出到文件夹…（桌面 FSA 选目标目录，无需解压）」/「批量分享（收进一个文件夹，子目录拍平）」，组总大小 >1GiB 守卫提示分批
+- 多选批量导出（T20）：接收列表复选框多选（仅已完成文件，可跨顶层目录组勾选），三种批量操作——「导出选中到文件夹…」（桌面 FSA，保持相对路径：photos/a.jpg → 目标目录下 photos/a.jpg，根目录散文件放目标根）/「导出选中 zip」（跨组打包，deflate level 6，手机分享/桌面下载路由同分组 zip）/「批量分享选中」（手机，shareNames 消歧）；选中总大小 >1GiB 守卫沿用；新会话（meta）自动清空勾选；现有逐文件与分组导出全部保留
 
 ## 开放问题（待拍板 / 待验证）
 1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。

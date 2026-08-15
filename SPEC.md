@@ -91,6 +91,11 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
     - **批量分享**：组内全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；`shareNames` basename + 父目录前缀消歧）
     - **根目录组**：散文件发送（name 无 `/`，如文件夹根目录文件）归入「全部文件/根目录」组，同样提供批量导出（zip/导出到文件夹/批量分享）；重名条目 zip/目录导出用 `uniqueZipPaths` 追加序号
     - 守卫：组总大小 > 1 GiB（`ZIP_TOTAL_GUARD_BYTES`）提示分批/逐文件导出（打包需整组读入内存，iOS 内存敏感）
+  - **多选批量导出（T20）**：接收列表已完成文件行带复选框，可跨顶层目录组勾选任意组合，勾选后提供三种批量操作（现有逐文件与分组导出全部保留）：
+    - **导出选中到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标 → 保持相对路径写入（`photos/a.jpg` → 目标目录下 `photos/a.jpg`；根目录散文件放目标根），无需解压
+    - **导出选中 zip**：跨组勾选打包为单个 zip（deflate level 6；分享/下载路由同分组 zip）
+    - **批量分享选中（手机）**：shareNames 消歧，一次进分享面板（子目录拍平）
+    - 新会话（meta）自动清空勾选；仅 `status === 'done'` 可勾；选中总大小 > 1 GiB 守卫与分组一致；路径消歧用 `disambiguateRootVsDir`——根散文件与目录首段同名时目录优先、散文件追加序号（FSA 建文件/建目录同名冲突会抛错）
 - `navigator.storage.estimate()` 在 iOS 恒返回 0，不可用于容量判断（spike 实测）；传输前容量预警：桌面用 estimate（quota-usage）精确判定；iOS 降级 OPFS 写探测（步进到目标/失败点，探测上限 2GiB，超出部分提示「无法精确预检」不阻断——传输中 QuotaExceededError 由 bitfield 续传兜底）
 
 ## 5. 信令
