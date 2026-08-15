@@ -1,10 +1,15 @@
 /**
- * dirPicker —— 桌面 Chrome File System Access 选文件夹（SPEC §6.3）。
+ * dirPicker —— 选文件夹（SPEC §6.3）。两条来源，产出同构：
  *
- * 浏览器选「文件夹」后得到 FileSystemDirectoryHandle（目录树句柄），
- * 需递归遍历并展平为文件列表；name 用相对路径（/ 分隔）——接收端
- * 存储层按 name 重建目录结构（OPFS dirOf 逐段 create），同名文件
- * 因路径不同而互不冲突，用户可辨识来源。
+ * 1. 桌面 Chrome/Edge：File System Access（showDirectoryPicker）→
+ *    FileSystemDirectoryHandle 目录树句柄，walkDirectory 递归遍历展平；
+ * 2. iOS Safari 18.4+ / Android Chrome / 桌面 Chrome：<input type=file
+ *    webkitdirectory> → 浏览器递归返回整棵目录树的 File[]，每个
+ *    File.webkitRelativePath = "<选中文件夹名>/<子目录>/<文件>"，
+ *    filesFromWebkitDirectory 去掉首段得到与 1 相同的相对路径。
+ *
+ * name 用相对路径（/ 分隔）——接收端存储层按 name 重建目录结构
+ * （OPFS dirOf 逐段 create），同名文件因路径不同而互不冲突。
  *
  * 安全：相对路径可能被用于 OPFS 拼接（sessions/<sid>/<fileId>/<name>），
  * 必须拒绝 ../ 穿越、绝对路径、反斜杠等 —— 校验逻辑见 storage/path.ts
@@ -64,4 +69,37 @@ export async function walkDirectory(handle: FileSystemDirectoryHandle, basePath 
     }
   }
   return { files, skipped }
+}
+
+/**
+ * webkitdirectory 的 File.webkitRelativePath → 与 walkDirectory 一致的相对路径。
+ *
+ * webkitRelativePath 首段是用户选中的文件夹名（"照片/2024/img.jpg"），
+ * 与桌面 showDirectoryPicker 语义对齐（name 相对选中文件夹根）→ 去掉首段。
+ * 无 '/'（异常情况）回退纯文件名。
+ */
+export function relFromWebkitPath(webkitPath: string, fallbackName: string): string {
+  const i = webkitPath.indexOf('/')
+  return i >= 0 ? webkitPath.slice(i + 1) : fallbackName
+}
+
+/**
+ * webkitdirectory 选中的 File[] → WalkResult（与 walkDirectory 同构）。
+ * - name = webkitRelativePath 去掉首段（根目录文件为纯文件名）
+ * - baseName = file.name；按 name 排序保证 UI 确定性（浏览器返回顺序不保证）
+ * - 路径不安全（isSafeRelPath 拒绝）的条目记入 skipped
+ */
+export function filesFromWebkitDirectory(files: File[]): WalkResult {
+  const out: PickedDirFile[] = []
+  const skipped: string[] = []
+  for (const file of files) {
+    const rel = relFromWebkitPath(file.webkitRelativePath || '', file.name)
+    if (!isSafeRelPath(rel)) {
+      skipped.push(rel)
+      continue
+    }
+    out.push({ name: rel, baseName: file.name, file })
+  }
+  out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  return { files: out, skipped }
 }

@@ -84,8 +84,11 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 - **孤儿数据**：启动扫描 `sessions/`：无 manifest 或超期（30 天）→ 提示清理；设置页「清除全部数据」一键删除 OPFS + IndexedDB
 - **分区**：iOS 各浏览器/独立 PWA 存储分区隔离 —— 数据写入与清理必须同一浏览器/模式（spike 实测）
 - **导出**：完成后拼接 → `navigator.share({ files })`：
-  - `image/*|video/*` 且 < 300 MiB → 分享面板可「存储到照片」
-  - 大文件 → 「存储到文件」，界面提示可经 Files 分享面板导入照片（原生分享可处理大文件；spike 实测 ~600MiB 视频经 Web Share 崩溃）
+  - 单文件：`image/*|video/*` 且 < 300 MiB → 分享面板可「存储到照片」；大文件 → 「存储到文件」，界面提示可经 Files 分享面板导入照片（原生分享可处理大文件；spike 实测 ~600MiB 视频经 Web Share 崩溃）
+  - **文件夹发送（name 含 `/`）**：接收端按顶层目录分组（`groupTopLevel`），目录组提供两种结构保持导出：
+    - **导出 zip（store，不压缩）**：整棵目录树打包为单个 zip（`zip.ts`，零依赖 store-only，UTF-8 文件名 + CRC-32；单条目 ≤ 4GiB zip32 上限），分享/下载后目标端「文件」App 原生解压即还原目录结构
+    - **批量分享**：组内全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；`shareNames` basename + 父目录前缀消歧）
+    - 守卫：组总大小 > 1 GiB（`ZIP_TOTAL_GUARD_BYTES`）提示分批/逐文件导出（Web Share 需整组读入内存，iOS 内存敏感）
 - `navigator.storage.estimate()` 在 iOS 恒返回 0，不可用于容量判断（spike 实测）；传输前容量预警：桌面用 estimate（quota-usage）精确判定；iOS 降级 OPFS 写探测（步进到目标/失败点，探测上限 2GiB，超出部分提示「无法精确预检」不阻断——传输中 QuotaExceededError 由 bitfield 续传兜底）
 
 ## 5. 信令
@@ -138,8 +141,8 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 1. **首页（在线）**：PIN 输入框（输即加入，可「随机生成」）→ 同 PIN 设备列表（名称/类型/在线状态）→ 点选连接 → 传输区；记住的房间自动重入（ADR-0006），二次使用零操作
 2. **首页（离线 / 信令不可用）**：显示「扫码配对」入口（轻量打磨版）；自动回房失败时降级至此
 3. **配对**：在线点选设备；离线走二维码（offer→answer 两次扫码，免选角色）
-4. **发送**：选文件（`<input type=file multiple>`；桌面 Chrome 用 File System Access 选文件夹）→ 开始 → 每 part 进度
-5. **接收**：`meta` 文件清单确认 → 自动接收（逐 part 进度）→ 完成 → 导出选择（照片门控 / 存文件）
+4. **发送**：选文件（`<input type=file multiple>`；**选文件夹**：桌面 Chrome/Edge 走 File System Access（`showDirectoryPicker`）；iOS Safari 18.4+ / Android Chrome 走 `<input type=file webkitdirectory>`（浏览器递归返回目录树，`webkitRelativePath` 去掉首段即相对路径）；两者均不支持（如 iOS <18.4）自动降级多选文件 + 提示）→ 开始 → 每 part 进度。文件夹发送 name 为相对路径（`photos/2024/img.jpg`），接收端 OPFS 按 name 逐段重建目录
+5. **接收**：`meta` 文件清单确认 → 自动接收（逐 part 进度）→ 完成 → 导出选择：单文件（照片门控 / 存文件）；文件夹发送按顶层目录分组 →「导出 zip（保留目录结构）」/「批量分享」
 6. **断连**：在线自动重连续传；离线断线警告旁提供「重新配对」快捷入口（§5.3 打磨，一步回 offer 页），数据从 bitfield 断点继续
 7. **设置**：设备名、会话列表（续传/删除）、退出房间（清 `lt.lastRoom`）、清除全部数据
 8. **Wake Lock**（iOS 17+）：传输期间保持屏幕常亮；不可用时界面提示

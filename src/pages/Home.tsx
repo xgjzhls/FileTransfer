@@ -13,7 +13,12 @@ import { RtcPeer } from '../webrtc/peer'
 import { TransferController } from '../transfer/controller'
 import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
-import { walkDirectory, basename } from '../transfer/dirPicker'
+import { walkDirectory, filesFromWebkitDirectory, basename } from '../transfer/dirPicker'
+import type { PickedDirFile } from '../transfer/dirPicker'
+import { groupTopLevel, shareNames, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
+import type { FolderGroup } from '../transfer/folderExport'
+import { buildStoreZip, ZIP_MIME } from '../transfer/zip'
+import type { ZipEntry } from '../transfer/zip'
 import { WakeLockManager } from '../wakelock/wakeLock'
 import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
@@ -61,6 +66,17 @@ interface RecvItem {
   totalChunks: number
 }
 
+/**
+ * 文件夹选择能力（SPEC §6.3）：
+ * - 桌面 Chrome/Edge：File System Access（showDirectoryPicker，项目原实现）
+ * - iOS Safari 18.4+ / Android Chrome / 桌面 Chrome：webkitdirectory
+ *   （<input type=file webkitdirectory>，浏览器递归返回目录树 File[]）
+ * 两者满足其一即显示「选择文件夹」；都不满足（如 iOS <18.4）降级多选文件。
+ */
+const CAN_PICK_DIR =
+  typeof window !== 'undefined' &&
+  ('showDirectoryPicker' in window || 'webkitdirectory' in HTMLInputElement.prototype)
+
 export default function Home() {
   const [orphans, setOrphans] = useState<OrphanReport | null>(null)
   const [room, setRoom] = useState('')
@@ -104,8 +120,15 @@ export default function Home() {
     }
   }, [])
   const fileInputRef = useRef<HTMLInputElement>(null)
+  /** iOS Safari 18.4+ / Android Chrome：<input type=file webkitdirectory> 选文件夹 */
+  const webkitDirRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const recvMetaRef = useRef<FileMeta[]>([])
+
+  // webkitdirectory 是 IDL 属性：ref 挂载后置位，保证 iOS/Android 选择器语义生效
+  useEffect(() => {
+    if (webkitDirRef.current) webkitDirRef.current.webkitdirectory = true
+  }, [])
 
   // T12：设备身份持久化（lt.deviceId）——重载后同一身份重连，旧 presence 不残留
   const device = useMemo(
@@ -453,6 +476,26 @@ export default function Home() {
     fileInputRef.current?.click()
   }
 
+  /** 选文件夹：桌面 Chrome/Edge 走 File System Access；其余（iOS 18.4+ / Android）走 webkitdirectory */
+  function pickFolderAny() {
+    if ('showDirectoryPicker' in window) void pickFolder()
+    else webkitDirRef.current?.click()
+  }
+
+  /** 选中文件 → 发送队列（relName=相对路径；文件夹场景复用；进度按 name:size 缓存） */
+  function buildSendItems(picked: PickedDirFile[]): SendItem[] {
+    const progress = getSendProgress()
+    return picked.map((f, i) => ({
+      id: i,
+      file: f.file,
+      relName: f.name,
+      status: 'pending' as const,
+      sentChunks: 0,
+      totalChunks: 0,
+      doneParts: progress[`${f.name}:${f.file.size}`] ?? 0,
+    }))
+  }
+
   /** SPEC §6.3：桌面 Chrome 用 File System Access 选文件夹发送（递归含子目录） */
   async function pickFolder() {
     if (!('showDirectoryPicker' in window)) return
@@ -465,18 +508,7 @@ export default function Home() {
         setStatus(skipped.length > 0 ? '所选文件夹无可发送文件（含不支持的文件名）' : '所选文件夹为空')
         return
       }
-      const progress = getSendProgress()
-      setSendItems(
-        picked.map((f, i) => ({
-          id: i,
-          file: f.file,
-          relName: f.name,
-          status: 'pending' as const,
-          sentChunks: 0,
-          totalChunks: 0,
-          doneParts: progress[`${f.name}:${f.file.size}`] ?? 0,
-        })),
-      )
+      setSendItems(buildSendItems(picked))
       setStatus(
         `已选文件夹 ${dirHandle.name}（${picked.length} 个文件）${skipped.length > 0 ? `，跳过 ${skipped.length} 个不支持的文件名` : ''}，点「开始发送」`,
       )
@@ -504,6 +536,28 @@ export default function Home() {
       })),
     )
     setStatus(`已选 ${files.length} 个文件，点「开始发送」`)
+  }
+
+  /**
+   * SPEC §6.3：webkitdirectory 选文件夹（iOS Safari 18.4+ / Android Chrome）。
+   * 浏览器递归返回整棵目录树 File[]，每个 webkitRelativePath 带子目录结构。
+   */
+  function onWebkitDirSelected() {
+    const input = webkitDirRef.current
+    const files = Array.from(input?.files ?? [])
+    if (input) input.value = '' // 清空以允许重复选择同一文件夹（FileList 不可重置）
+    if (files.length === 0) return
+    setError('')
+    setStatus('正在扫描文件夹…')
+    const { files: picked, skipped } = filesFromWebkitDirectory(files)
+    if (picked.length === 0) {
+      setStatus(skipped.length > 0 ? '所选文件夹无可发送文件（含不支持的文件名）' : '所选文件夹为空')
+      return
+    }
+    setSendItems(buildSendItems(picked))
+    setStatus(
+      `已选文件夹（${picked.length} 个文件，含子目录）${skipped.length > 0 ? `，跳过 ${skipped.length} 个不支持的文件名` : ''}，点「开始发送」`,
+    )
   }
 
   async function startSend() {
@@ -556,13 +610,10 @@ export default function Home() {
   }
 
   async function exportFile(item: RecvItem, mode: 'share' | 'download') {
-    const fileMeta = recvMetaRef.current.find((f) => f.id === item.id)
-    if (!fileMeta || !sessionId) return
+    if (!sessionId) return
     setExportMsg('拼接中…')
     try {
-      const adapter = getStorageAdapter()
-      await adapter.merge(sessionId, item.id, item.name, fileMeta.parts.length)
-      const bytes = await adapter.readMerged(sessionId, item.id, item.name)
+      const bytes = await readMergedOf(item)
       // 文件夹发送的文件名含相对路径（photos/a.jpg）：导出/下载必须用 basename
       // （a.download 与 share File.name 不允许路径分隔符）
       const name = basename(item.name)
@@ -599,7 +650,83 @@ export default function Home() {
     }
   }
 
+  /** 读取接收端已拼接文件（exportFile 的 merge+read 模式，供文件夹导出复用） */
+  async function readMergedOf(item: RecvItem): Promise<Uint8Array<ArrayBuffer>> {
+    const fileMeta = recvMetaRef.current.find((f) => f.id === item.id)
+    if (!fileMeta || !sessionId) throw new Error('接收清单缺失')
+    const adapter = getStorageAdapter()
+    await adapter.merge(sessionId, item.id, item.name, fileMeta.parts.length)
+    // rpc 反序列化恒为 ArrayBuffer 支撑（worker 结构化克隆），cast 安全
+    return adapter.readMerged(sessionId, item.id, item.name) as Promise<Uint8Array<ArrayBuffer>>
+  }
+
+  /**
+   * 文件夹导出 zip（store，不压缩）：目录树结构 100% 保留（SPEC §4）。
+   * 分享 → 目标端「文件」App 原生解压即还原整棵目录树；下载 → 浏览器下载。
+   */
+  async function exportFolderZip(group: FolderGroup<RecvItem>, mode: 'share' | 'download') {
+    if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
+      setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB 打包上限，请分批或逐文件导出`)
+      return
+    }
+    setExportMsg(`正在打包 ${group.dir}/ 为 zip…`)
+    try {
+      const entries: ZipEntry[] = []
+      for (const it of group.items) {
+        const bytes = await readMergedOf(it)
+        entries.push({ path: it.name, data: bytes })
+      }
+      const blob = buildStoreZip(entries)
+      const zipName = `${group.dir}.zip`
+      if (mode === 'download') {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = zipName
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        URL.revokeObjectURL(url)
+      } else {
+        const file = new File([blob], zipName, { type: ZIP_MIME })
+        await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+      }
+      setExportMsg(`已导出 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
+  /** 文件夹批量分享：全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平） */
+  async function exportFolderShare(group: FolderGroup<RecvItem>) {
+    if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
+      setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB，请分批或逐文件导出`)
+      return
+    }
+    setExportMsg('正在拼接文件…')
+    try {
+      const names = shareNames(group.items)
+      const files: File[] = []
+      for (const it of group.items) {
+        const shareName = names.get(it.name)!
+        const bytes = await readMergedOf(it)
+        files.push(new File([bytes.buffer as ArrayBuffer], shareName, { type: guessMime(shareName) }))
+      }
+      await navigator.share({ files, title: group.dir, text: '存储到文件（多个文件收进一个文件夹，子目录拍平）' })
+      setExportMsg(`已批量分享 ${group.items.length} 个文件（分享面板选「存储到文件」）`)
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
   const orphanCount = orphans?.orphans.length ?? 0
+
+  // SPEC §4：接收文件按顶层目录分组（文件夹发送 → 结构保持导出单元）
+  const folderGroups = useMemo(() => groupTopLevel(recvItems), [recvItems])
 
   return (
     <>
@@ -749,10 +876,15 @@ export default function Home() {
                 style={{ display: 'none' }}
                 onChange={onFilesSelected}
               />
+              <input
+                ref={webkitDirRef}
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                onChange={onWebkitDirSelected}
+              />
               <button onClick={pickFiles}>选择文件</button>
-              {'showDirectoryPicker' in window && (
-                <button onClick={() => void pickFolder()}>选择文件夹</button>
-              )}
+              {CAN_PICK_DIR && <button onClick={pickFolderAny}>选择文件夹</button>}
               {sendItems.length > 0 && (
                 <button onClick={() => void startSend()} disabled={sendItems.every((it) => it.status === 'done')}>
                   开始发送
@@ -762,6 +894,11 @@ export default function Home() {
                 <button onClick={() => abortRef.current?.abort()}>取消</button>
               )}
             </div>
+            {!CAN_PICK_DIR && (
+              <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
+                选文件夹需 iOS 18.4+ / 支持 webkitdirectory 的浏览器；当前设备可先多选文件发送。
+              </p>
+            )}
 
             {sendItems.length > 0 && (
               <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0' }}>
@@ -797,6 +934,31 @@ export default function Home() {
                     {capacity.message}
                   </p>
                 )}
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {folderGroups.map((g) =>
+                    g.dir === '' ? null : (
+                      <li key={g.dir} style={{ margin: '8px 0' }}>
+                        <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                          <span>
+                            📁 {g.dir}/{' '}
+                            <span className="muted">({g.items.length} 个文件 · {formatBytes(g.totalBytes)})</span>
+                          </span>
+                          {g.items.every((it) => it.status === 'done') ? (
+                            <div className="row" style={{ flexWrap: 'wrap', rowGap: 4 }}>
+                              <button onClick={() => void exportFolderZip(g, 'share')}>导出 zip</button>
+                              <button onClick={() => void exportFolderZip(g, 'download')}>下载 zip</button>
+                              <button onClick={() => void exportFolderShare(g)}>批量分享</button>
+                            </div>
+                          ) : (
+                            <span className="mono">
+                              {g.items.filter((it) => it.status === 'done').length}/{g.items.length} 完成
+                            </span>
+                          )}
+                        </div>
+                      </li>
+                    ),
+                  )}
+                </ul>
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {recvItems.map((it) => (
                     <li key={it.id} style={{ margin: '8px 0' }}>

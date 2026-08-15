@@ -7,7 +7,13 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { walkDirectory, isSafeRelPath, basename } from './dirPicker'
+import {
+  walkDirectory,
+  filesFromWebkitDirectory,
+  relFromWebkitPath,
+  isSafeRelPath,
+  basename,
+} from './dirPicker'
 import type { PickedDirFile, WalkResult } from './dirPicker'
 
 /** 最小 FileSystemDirectoryHandle mock（只实现本模块用到的接口） */
@@ -118,6 +124,50 @@ describe('walkDirectory — 递归遍历 + 相对路径（SPEC §6.3）', () => 
     const r = await walk(root)
     expect(namesOf(r.files)).toEqual(['ok.txt', 'p/img.jpg', 'p/sub/n.txt'])
     expect(r.skipped).toEqual(['a\\b.txt', 'p/..\\evil'])
+  })
+})
+
+describe('relFromWebkitPath / filesFromWebkitDirectory — webkitdirectory（iOS Safari 18.4+）', () => {
+  it('relFromWebkitPath：去掉首段（选中文件夹名），与 walkDirectory 相对路径语义一致', () => {
+    expect(relFromWebkitPath('照片/2024/img.jpg', 'img.jpg')).toBe('2024/img.jpg')
+    expect(relFromWebkitPath('photos/a.txt', 'a.txt')).toBe('a.txt')
+    expect(relFromWebkitPath('photos/sub/deep/b.txt', 'b.txt')).toBe('sub/deep/b.txt')
+    expect(relFromWebkitPath('a.txt', 'a.txt')).toBe('a.txt') // 异常：无 '/' → 回退纯文件名
+    expect(relFromWebkitPath('', 'fallback.txt')).toBe('fallback.txt')
+  })
+
+  it('递归文件列表 → name/baseName，按 name 排序（浏览器返回顺序不保证）', () => {
+    const mk = (name: string, rel: string): File => {
+      const f = new File(['x'], name)
+      Object.defineProperty(f, 'webkitRelativePath', { value: rel })
+      return f
+    }
+    const r = filesFromWebkitDirectory([
+      mk('c.txt', 'folder/docs/c.txt'),
+      mk('img.jpg', 'folder/2024/img.jpg'),
+      mk('n.txt', 'folder/a/n.txt'),
+    ])
+    expect(namesOf(r.files)).toEqual(['2024/img.jpg', 'a/n.txt', 'docs/c.txt'])
+    expect(r.files.map((f) => f.baseName)).toEqual(['img.jpg', 'n.txt', 'c.txt'])
+    expect(r.skipped).toEqual([])
+  })
+
+  it('嵌套多级子目录：相对路径完整保留', () => {
+    const f = new File(['x'], 'v.mp4')
+    Object.defineProperty(f, 'webkitRelativePath', { value: '视频/旅行/2024/剪辑/v.mp4' })
+    const r = filesFromWebkitDirectory([f])
+    expect(r.files[0].name).toBe('旅行/2024/剪辑/v.mp4')
+    expect(r.files[0].baseName).toBe('v.mp4')
+  })
+
+  it('路径不安全（../ 穿越等）记入 skipped，不进发送队列', () => {
+    const evil = new File(['x'], 'evil')
+    Object.defineProperty(evil, 'webkitRelativePath', { value: 'folder/../evil' })
+    const ok = new File(['x'], 'ok.txt')
+    Object.defineProperty(ok, 'webkitRelativePath', { value: 'folder/ok.txt' })
+    const r = filesFromWebkitDirectory([evil, ok])
+    expect(namesOf(r.files)).toEqual(['ok.txt'])
+    expect(r.skipped).toEqual(['../evil'])
   })
 })
 
