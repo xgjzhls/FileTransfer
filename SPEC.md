@@ -86,7 +86,7 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 - **导出**：完成后拼接 → `navigator.share({ files })`：
   - `image/*|video/*` 且 < 300 MiB → 分享面板可「存储到照片」
   - 大文件 → 「存储到文件」，界面提示可经 Files 分享面板导入照片（原生分享可处理大文件；spike 实测 ~600MiB 视频经 Web Share 崩溃）
-- `navigator.storage.estimate()` 在 iOS 恒返回 0，不可用于容量判断（spike 实测）；传输前容量预警暂以设备剩余空间估算（[v2]）
+- `navigator.storage.estimate()` 在 iOS 恒返回 0，不可用于容量判断（spike 实测）；传输前容量预警：桌面用 estimate（quota-usage）精确判定；iOS 降级 OPFS 写探测（步进到目标/失败点，探测上限 2GiB，超出部分提示「无法精确预检」不阻断——传输中 QuotaExceededError 由 bitfield 续传兜底）
 
 ## 5. 信令
 

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '../storage'
 import type { OrphanReport } from '../storage'
+import { checkIncomingCapacity } from '../storage/capacityCheck'
 import { clearSendProgress, getSendProgress, setSendProgress } from '../transfer/progressCache'
 import { createBrowserSocket } from '../signaling/client'
 import type { SignalingEvents } from '../signaling/client'
@@ -87,6 +88,10 @@ export default function Home() {
   const [recvItems, setRecvItems] = useState<RecvItem[]>([])
   const [exportMsg, setExportMsg] = useState('')
   const [sessionId, setSessionId] = useState('')
+  // SPEC §4 容量预警：接收前异步检查（estimate 优先 / iOS 探测），不阻塞接收
+  const [capacity, setCapacity] = useState<{ level: 'info' | 'warn'; message: string } | null>(null)
+  /** 容量检查代际：新 meta 使旧检查结果作废（竞态守卫） */
+  const capacityEpochRef = useRef(0)
   // T08 Wake Lock：传输期间保持屏幕常亮（iOS 17+）；状态驱动界面提示。
   // 实例在 effect 内创建/销毁：StrictMode 双跑（同实例重放 effect）会重建 manager，
   // dispose 是永久性的，不能在渲染期懒创建后跨 effect 复用。
@@ -207,6 +212,15 @@ export default function Home() {
               })),
             )
             setStatus(`收到 ${files.length} 个文件的清单，开始接收`)
+            // 容量预警（SPEC §4）：estimate 可靠时精确判定，iOS 走写探测；
+            // 充足（level ok）静默，不足/无法预检时提示（接收不阻断）
+            const totalBytes = files.reduce((s, f) => s + f.size, 0)
+            const epoch = ++capacityEpochRef.current
+            setCapacity(null)
+            void checkIncomingCapacity(totalBytes).then((v) => {
+              if (capacityEpochRef.current !== epoch) return // 过期结果（新 meta 已来）丢弃
+              setCapacity(v.level === 'ok' ? null : { level: v.level, message: v.message })
+            })
           },
           onProgress: (fileId, sent, total) => {
             setSendItems((prev) =>
@@ -739,6 +753,14 @@ export default function Home() {
             {recvItems.length > 0 && (
               <>
                 <h3 style={{ fontSize: 13, margin: '12px 0 6px', color: 'var(--muted)' }}>接收</h3>
+                {capacity && recvItems.some((it) => it.status === 'receiving') && (
+                  <p
+                    className={capacity.level === 'warn' ? 'bad' : 'muted'}
+                    style={{ margin: '4px 0 8px' }}
+                  >
+                    {capacity.message}
+                  </p>
+                )}
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {recvItems.map((it) => (
                     <li key={it.id} style={{ margin: '8px 0' }}>
