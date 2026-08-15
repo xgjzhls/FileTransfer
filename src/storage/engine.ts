@@ -9,14 +9,16 @@
  */
 
 import type { SessionDirInfo, SyncFs, SyncHandle } from './types'
+import { isSafeRelPath } from './path'
 
 /** SPEC §4 布局 —— part 文件路径 */
 export function partPath(sessionId: string, fileId: number, partIndex: number): string {
   return `sessions/${sessionId}/${fileId}/part-${partIndex}.bin`
 }
 
-/** SPEC §4 布局 —— 拼接文件路径 */
+/** SPEC §4 布局 —— 拼接文件路径（name 来自 meta，必须为安全相对路径） */
 export function mergedPath(sessionId: string, fileId: number, name: string): string {
+  if (!isSafeRelPath(name)) throw new Error(`unsafe merged file name: ${JSON.stringify(name)}`)
   return `sessions/${sessionId}/${fileId}/${name}`
 }
 

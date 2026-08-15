@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { MemorySyncFs } from './memorySyncFs'
-import { StorageEngine } from './engine'
-import { sha256Hex } from './engine'
+import { StorageEngine, mergedPath, sha256Hex } from './engine'
 
 const enc = new TextEncoder()
 
@@ -135,6 +134,35 @@ describe('StorageEngine — merge 拼接', () => {
     await engine.merge('s1', 0, 'out.txt', 2)
     expect(decode(await engine.readPart('s1', 0, 0))).toBe('hello')
     expect(decode(await engine.readPart('s1', 0, 1))).toBe('world')
+  })
+
+  it('文件夹发送：name 含相对路径时按子目录拼接并读回（SPEC §6.3）', async () => {
+    const { engine } = setup()
+    await writeTextPart(engine, 's1', 0, 0, [[0, 'hello']])
+    await writeTextPart(engine, 's1', 0, 1, [[0, 'world']])
+    await engine.merge('s1', 0, 'photos/2024/img.jpg', 2)
+    expect(decode(await engine.readMerged('s1', 0, 'photos/2024/img.jpg'))).toBe('helloworld')
+    // part 文件仍在原布局
+    expect(decode(await engine.readPart('s1', 0, 0))).toBe('hello')
+  })
+
+  it('路径穿越防御：非法 name（../、绝对路径）merge/readMerged 抛错', async () => {
+    const { engine } = setup()
+    await writeTextPart(engine, 's1', 0, 0, [[0, 'hello']])
+    await expect(engine.merge('s1', 0, '../evil', 1)).rejects.toThrow()
+    await expect(engine.merge('s1', 0, '/abs', 1)).rejects.toThrow()
+    await expect(engine.merge('s1', 0, 'a\\b', 1)).rejects.toThrow()
+    await expect(engine.merge('s1', 0, 'a/../b', 1)).rejects.toThrow()
+    // 合法 name 正常
+    await engine.merge('s1', 0, 'ok.txt', 1)
+    expect(decode(await engine.readMerged('s1', 0, 'ok.txt'))).toBe('hello')
+  })
+
+  it('mergedPath：非法 name 直接抛错（不进入文件系统）', () => {
+    expect(() => mergedPath('s1', 0, '..')).toThrow()
+    expect(() => mergedPath('s1', 0, '/abs')).toThrow()
+    expect(() => mergedPath('s1', 0, 'a//b')).toThrow()
+    expect(mergedPath('s1', 0, 'dir/a.bin')).toBe('sessions/s1/0/dir/a.bin')
   })
 })
 

@@ -12,6 +12,7 @@ import { RtcPeer } from '../webrtc/peer'
 import { TransferController } from '../transfer/controller'
 import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
+import { walkDirectory, basename } from '../transfer/dirPicker'
 import { WakeLockManager } from '../wakelock/wakeLock'
 import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
@@ -46,6 +47,8 @@ function detectKind(): DeviceKind {
 interface SendItem {
   id: number
   file: File
+  /** 传输/存储用的名称：文件夹发送时为相对路径（photos/a.jpg），文件选择时为文件名 */
+  relName: string
   status: 'pending' | 'transferring' | 'done'
   sentChunks: number
   totalChunks: number
@@ -228,7 +231,7 @@ export default function Home() {
             // 缓存写操作移出 state updater（StrictMode 双调用纯度）
             const items = sendItemsRef.current
             const it = items.find((x) => x.id === fileId)
-            if (it) clearSendProgress(it.file.name, it.file.size)
+            if (it) clearSendProgress(it.relName, it.file.size)
             setSendItems((prev) =>
               prev.map((x): SendItem => (x.id === fileId ? { ...x, status: 'done' } : x)),
             )
@@ -240,13 +243,17 @@ export default function Home() {
           onPartDone: (fileId, partIndex) => {
             // 本地进度缓存（重载后恢复显示；非权威）——写操作在 updater 外
             const it = sendItemsRef.current.find((x) => x.id === fileId)
-            if (it) setSendProgress(it.file.name, it.file.size, partIndex + 1)
+            if (it) setSendProgress(it.relName, it.file.size, partIndex + 1)
             setSendItems((prev) =>
               prev.map((x) => (x.id === fileId ? { ...x, doneParts: partIndex + 1 } : x)),
             )
           },
           onResumeMismatch: (fileName) =>
             setStatus(`文件 ${fileName} 与已收清单不一致（可能被修改），已重新开始接收`),
+          onInvalidFiles: (names) =>
+            setStatus(
+              `已忽略 ${names.length} 个路径非法的文件（${names.slice(0, 3).join('、')}${names.length > 3 ? '…' : ''}）`,
+            ),
         },
         getSessionStore(),
       )
@@ -409,6 +416,41 @@ export default function Home() {
     fileInputRef.current?.click()
   }
 
+  /** SPEC §6.3：桌面 Chrome 用 File System Access 选文件夹发送（递归含子目录） */
+  async function pickFolder() {
+    if (!('showDirectoryPicker' in window)) return
+    setError('')
+    try {
+      const dirHandle = await window.showDirectoryPicker()
+      setStatus('正在扫描文件夹…')
+      const { files: picked, skipped } = await walkDirectory(dirHandle)
+      if (picked.length === 0) {
+        setStatus(skipped.length > 0 ? '所选文件夹无可发送文件（含不支持的文件名）' : '所选文件夹为空')
+        return
+      }
+      const progress = getSendProgress()
+      setSendItems(
+        picked.map((f, i) => ({
+          id: i,
+          file: f.file,
+          relName: f.name,
+          status: 'pending' as const,
+          sentChunks: 0,
+          totalChunks: 0,
+          doneParts: progress[`${f.name}:${f.file.size}`] ?? 0,
+        })),
+      )
+      setStatus(
+        `已选文件夹 ${dirHandle.name}（${picked.length} 个文件）${skipped.length > 0 ? `，跳过 ${skipped.length} 个不支持的文件名` : ''}，点「开始发送」`,
+      )
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        // 用户取消选择（AbortError）静默；其余为权限/读取错误
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    }
+  }
+
   function onFilesSelected() {
     const files = Array.from(fileInputRef.current?.files ?? [])
     if (files.length === 0) return
@@ -417,6 +459,7 @@ export default function Home() {
       files.map((file, i) => ({
         id: i,
         file,
+        relName: file.name,
         status: 'pending',
         sentChunks: 0,
         totalChunks: 0,
@@ -449,10 +492,10 @@ export default function Home() {
     }
     const sources = items.map((it) => ({
       id: it.id,
-      name: it.file.name,
+      name: it.relName,
       size: it.file.size,
       source: {
-        name: it.file.name,
+        name: it.relName,
         size: it.file.size,
         slice: async (start: number, end: number) => {
           const blob = it.file.slice(start, end)
@@ -483,31 +526,34 @@ export default function Home() {
       const adapter = getStorageAdapter()
       await adapter.merge(sessionId, item.id, item.name, fileMeta.parts.length)
       const bytes = await adapter.readMerged(sessionId, item.id, item.name)
+      // 文件夹发送的文件名含相对路径（photos/a.jpg）：导出/下载必须用 basename
+      // （a.download 与 share File.name 不允许路径分隔符）
+      const name = basename(item.name)
       if (mode === 'download') {
         // 桌面：保存到文件系统（下载目录或选择位置）
-        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: guessMime(item.name) })
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: guessMime(name) })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = item.name
+        a.download = name
         document.body.appendChild(a)
         a.click()
         a.remove()
         URL.revokeObjectURL(url)
-        setExportMsg(`已下载 ${item.name}（浏览器下载目录）`)
+        setExportMsg(`已下载 ${name}（浏览器下载目录）`)
         return
       }
-      const file = new File([bytes.buffer as ArrayBuffer], item.name, { type: guessMime(item.name) })
-      const target = classifyExport(item.name, item.size)
+      const file = new File([bytes.buffer as ArrayBuffer], name, { type: guessMime(name) })
+      const target = classifyExport(name, item.size)
       await navigator.share({
         files: [file],
-        title: item.name,
+        title: name,
         text: target === 'photo' ? '存储到照片' : '存储到文件',
       })
       setExportMsg(
         target === 'photo'
-          ? `已导出 ${item.name}（分享面板选「存储到照片」）`
-          : `已导出 ${item.name}（分享面板选「存储到文件」）`,
+          ? `已导出 ${name}（分享面板选「存储到照片」）`
+          : `已导出 ${name}（分享面板选「存储到文件」）`,
       )
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
@@ -654,6 +700,9 @@ export default function Home() {
                 onChange={onFilesSelected}
               />
               <button onClick={pickFiles}>选择文件</button>
+              {'showDirectoryPicker' in window && (
+                <button onClick={() => void pickFolder()}>选择文件夹</button>
+              )}
               {sendItems.length > 0 && (
                 <button onClick={() => void startSend()} disabled={sendItems.every((it) => it.status === 'done')}>
                   开始发送
@@ -668,8 +717,8 @@ export default function Home() {
               <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0' }}>
                 {sendItems.map((it) => (
                   <li key={it.id} className="row" style={{ justifyContent: 'space-between' }}>
-                    <span>
-                      {it.file.name} <span className="muted">({formatBytes(it.file.size)})</span>
+                    <span title={it.relName}>
+                      {it.relName} <span className="muted">({formatBytes(it.file.size)})</span>
                     </span>
                     {it.status === 'done' ? (
                       <span className="ok">完成 ✓</span>

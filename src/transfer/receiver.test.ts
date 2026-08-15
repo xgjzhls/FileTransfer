@@ -92,6 +92,36 @@ describe('Receiver — chunk 落盘与 part 完成（SPEC §3.4）', () => {
     expect(sink.writeChunk).not.toHaveBeenCalled()
   })
 
+  it('meta 含非法相对路径名（../ 穿越等）：该文件被跳过，不建状态不写盘，回调提示', async () => {
+    const evil: MetaMessage = {
+      type: 'meta',
+      sessionId: 's2',
+      files: [
+        { id: 0, name: '../evil', size: 1, parts: [{ index: 0, size: 1, sha256: 'X' }] },
+        { id: 1, name: '/abs', size: 1, parts: [{ index: 0, size: 1, sha256: 'X' }] },
+        { id: 2, name: 'a\\b', size: 1, parts: [{ index: 0, size: 1, sha256: 'X' }] },
+        { id: 3, name: 'ok.txt', size: 2, parts: [{ index: 0, size: 2, sha256: 'EXPECTED' }] },
+      ],
+    }
+    const invalid: string[] = []
+    const sink = new FakeSink()
+    const r2 = new Receiver(sink, () => {}, {
+      onProgress: () => {},
+      onFileDone: () => {},
+      onInvalidFiles: (n) => invalid.push(...n),
+    })
+    r2.onMeta(evil)
+    // 非法文件不 open part；合法文件正常接收
+    await r2.onChunk(3, 0, 0, new Uint8Array(2))
+    expect(sink.openPart).toHaveBeenCalledTimes(1)
+    expect(sink.openPart).toHaveBeenCalledWith('s2', 3, 0)
+    expect(invalid).toEqual(['../evil', '/abs', 'a\\b'])
+    // 非法文件的 chunk 到达被静默丢弃（file 不存在）
+    await r2.onChunk(0, 0, 0, new Uint8Array(1))
+    await r2.onChunk(1, 0, 0, new Uint8Array(1))
+    expect(sink.openPart).toHaveBeenCalledTimes(1)
+  })
+
   it('并发 chunk（不逐个 await）：按到达顺序串行落盘', async () => {
     const { sink, receiver, controls } = setup()
     receiver.onMeta(META)

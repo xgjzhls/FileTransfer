@@ -42,6 +42,18 @@ async function waitStatus(page, target, timeout = 30000) {
   )
 }
 
+/** 等待连接状态徽章落在任一候选（降级模式：offer/answer 已交换即算连接进行中） */
+async function waitStatusAny(page, targets, timeout = 30000) {
+  await page.waitForFunction(
+    (ts) => {
+      const badge = [...document.querySelectorAll('.badge')].find((b) => b.textContent?.includes('状态：'))
+      return badge !== undefined && ts.some((t) => badge.textContent?.includes(t))
+    },
+    targets,
+    { timeout },
+  )
+}
+
 /** 轮询连接状态徽章直到脱离 signaling/connecting；返回最终状态字符串 */
 async function waitFinalConnState(page, timeoutMs) {
   const t0 = Date.now()
@@ -173,9 +185,10 @@ try {
     })
     step('文件传输，B 端接收完成（显示导出）', true, '3 MiB')
   } else {
-    await waitStatus(pageA, 'signaling')
-    await waitStatus(pageB, 'signaling')
-    step('（降级）A 点连接：两端进入 signaling（offer/answer 已交换）', true)
+    // 信令往返快时 signaling 可能一闪而过直接到 connecting：两者都算「连接进行中」
+    await waitStatusAny(pageA, ['signaling', 'connecting'])
+    await waitStatusAny(pageB, ['signaling', 'connecting'])
+    step('（降级）A 点连接：两端进入 signaling/connecting（offer/answer 已交换）', true)
     step('（降级）WebRTC connected + 传输断言跳过', true, '环境不支持同机 ICE')
   }
 

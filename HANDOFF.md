@@ -8,8 +8,8 @@
 
 ## 仓库状态
 - 远程：`git@github.com:xgjzhls/FileTransfer.git`（origin）
-- 分支：`main`（T01-T07 代码完成，T08 代码完成：Wake Lock/取消重试/分区提示；T07 含 215 单测 + e2e 15/15（全量）/ 14/14（降级））；`prototype/storage-spike`（只读参考，勿动）
-- **T01-T05 代码全部完成，T09/T10/T06 代码完成，T07（离线二维码配对）代码完成，T08（收尾）代码完成**；**下一步：T08 真机验收（多端联调 + 照片门控实测 + 体验走查），验收即 v1**
+- 分支：`main`（T01-T07 代码完成，T08 代码完成：Wake Lock/取消重试/分区提示 + **文件夹发送（SPEC §6.3）**；237 单测 + e2e 14/14（降级））；`prototype/storage-spike`（只读参考，勿动）
+- **T01-T10 代码全部完成，另含文件夹发送（桌面 Chrome File System Access，SPEC §6.3）**；**下一步：T08 真机验收（多端联调 + 照片门控实测 + 体验走查 + 文件夹发送真机验证），验收即 v1**
 
 ## 已有产物
 | 路径 | 内容 |
@@ -29,7 +29,7 @@
 - **下一步：T08 真机验收（多端联调 + 照片门控阈值实测 + 体验走查），验收即 v1**
 - 依赖图：T03 → T04 → T05 → T06 ✅；T04 ← T07 ✅；T05/06/07 → T08；T09 → T06（前置 ✅）；T10 → T08（部署必现 ✅）
 - 待用户验证：T02 验收 6（iPhone 1GB 写入拼接）、T05 验收 6（双浏览器 1GB+ 传输 SHA-256 一致 + iPhone 真机）、T09/T10 断网恢复与线上 evict、T06 断连续传（e2e 桌面已绿，真机未验）、**T07 验收 6（两部 iPhone / iPhone+Mac 纯局域网扫码配对传输）**
-- `npm test` 196/196 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）全量 15/15（WebRTC 可用时）/ 降级 14/14（本机 Clash fake-ip 干扰时：仅 UI + 信令 + T07 SDP 交换）
+- `npm test` 237/237 绿；`node scripts/e2e.mjs`（E2E_NO_PROXY=1）降级 14/14（本机 ICE 不可达时：仅 UI + 信令 + T07 SDP 交换）；全量 15/15 需 Clash 退出
 
 ## 本地测试环境（全本地，绕开 Cloudflare 网络问题）——关键
 用户网络：DNS 被 Clash fake-ip 劫持（198.18.x.x），不开系统代理/TUN 无法直连 Cloudflare；**开发测试一律走本地信令**：
@@ -53,7 +53,7 @@ VITE_HTTPS=1 npm run dev        # https://192.168.10.26:5173（电脑/手机同 
 - 证书 SAN：192.168.10.26 + 10.213.80.3 + 198.18.0.1 + 127.0.0.1 + localhost（**换机/换 IP 后重新生成**：openssl 命令见 `.local-certs/README.md`）
 
 ## 测试与验证
-- 单测：`npm test`（Vitest，215 个，含 storage/webrtc/transfer/signaling/server/wakelock）
+- 单测：`npm test`（Vitest，237 个，含 storage/webrtc/transfer/signaling/server/wakelock/dirPicker）
 - **e2e 点击测试**：`E2E_NO_PROXY=1 node scripts/e2e.mjs https://localhost:5173`（创建房间→加入→发现→connected→传文件→T06 断连续传→**T07 离线 QR 配对+传输**→杀 WS 重连→无 JS 错；WebRTC 环境双页探测自动降级）
   - e2e 默认走代理 `http://127.0.0.1:7890`（Clash），**Clash 退出后必须 E2E_NO_PROXY=1**
   - headless chromium 需 WebRTC 参数（脚本内置）：`--disable-features=WebRtcHideLocalIpsWithMdns --force-webrtc-ip-handling-policy=default_public_and_private_interfaces --allow-loopback-ice`

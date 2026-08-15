@@ -13,6 +13,7 @@
 
 import { CHUNK_SIZE } from './sender'
 import { CHUNKS_PER_BLOCK, blocksInPart, blockChunkRange, decodeBitfield, encodeBitfield } from './bitfield'
+import { isSafeRelPath } from '../storage/path'
 import type {
   FileMeta,
   MetaMessage,
@@ -43,6 +44,8 @@ export interface ReceiverEvents {
   onFileDone(fileId: number): void
   /** 同名同大小文件与已收清单不一致（被改过）→ 该文件重新开始接收 */
   onResumeMismatch?(fileName: string): void
+  /** meta 中相对路径非法的文件（../ 穿越等）被跳过 → 提示（防御恶意对端） */
+  onInvalidFiles?(names: string[]): void
 }
 
 interface PartState {
@@ -174,10 +177,15 @@ export class Receiver {
     }
   }
 
-  /** 从 meta + 持久化记录初始化（T06：done 跳过 / partial 还原位图） */
+  /** 从 meta + 持久化记录初始化（T06：done 跳过 / partial 还原位图；非法路径名跳过） */
   private initFiles(meta: MetaMessage, stored?: FileManifest[]): Map<number, FileState> {
     const files = new Map<number, FileState>()
+    const invalid: string[] = []
     for (const file of meta.files) {
+      if (!isSafeRelPath(file.name)) {
+        invalid.push(file.name)
+        continue // 防御：路径穿越名不建状态、不写盘；对应 chunk 到达时被 processChunk 丢弃
+      }
       const storedFile = stored?.find((s) => s.name === file.name && s.size === file.size)
       const usable = storedFile !== undefined && partsMatch(storedFile, file)
       if (storedFile && !usable) {
@@ -213,6 +221,7 @@ export class Receiver {
       }
       files.set(file.id, { name: file.name, parts, doneCount: countDone(parts) })
     }
+    if (invalid.length > 0) this.events.onInvalidFiles?.(invalid)
     return files
   }
 

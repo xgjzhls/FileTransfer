@@ -20,6 +20,7 @@ import { Receiver } from './receiver'
 import { Sender } from './sender'
 import { planParts } from '../webrtc/transferMeta'
 import { sha256Hex } from '../storage/engine'
+import { isSafeRelPath } from '../storage/path'
 import { PART_SIZE } from '../webrtc/transferMeta'
 import type { PartSink } from './receiver'
 import type { ChunkTransport, FileSource } from './sender'
@@ -39,6 +40,8 @@ export interface ControllerEvents {
   onError(reason: string): void
   /** 同名同大小文件与已收清单不一致（被改过）→ 该文件重新接收 */
   onResumeMismatch?(fileName: string): void
+  /** meta 中相对路径非法的文件被跳过（防御恶意对端） */
+  onInvalidFiles?(names: string[]): void
   /** 发送端某 part 完成（进度缓存用，可选） */
   onPartDone?(fileId: number, partIndex: number): void
 }
@@ -87,6 +90,7 @@ export class TransferController {
         onProgress: (f, p, r, t) => this.events.onRecvProgress(f, p, r, t),
         onFileDone: (f) => this.events.onFileDone(f),
         onResumeMismatch: (n) => this.events.onResumeMismatch?.(n),
+        onInvalidFiles: (n) => this.events.onInvalidFiles?.(n),
       },
       (fileId, partIndex, done, bitfield) => this.onResumeChange(fileId, partIndex, done, bitfield),
     )
@@ -168,12 +172,18 @@ export class TransferController {
   }
 
   private async handleMeta(msg: MetaMessage): Promise<void> {
-    const record = this.resumeStore ? await this.loadStored(msg) : undefined
-    this.receiver.onMeta(msg, record)
+    // 防御：路径非法（../ 穿越等）的文件在进入存储/UI 前统一剔除 ——
+    // Receiver 同样过滤（双保险），这里保证 resume 记录与事件只含合法文件
+    const validFiles = msg.files.filter((f) => isSafeRelPath(f.name))
+    const invalid = msg.files.filter((f) => !isSafeRelPath(f.name)).map((f) => f.name)
+    const clean = { ...msg, files: validFiles }
+    const record = this.resumeStore ? await this.loadStored(clean) : undefined
+    this.receiver.onMeta(clean, record)
+    if (invalid.length > 0) this.events.onInvalidFiles?.(invalid)
     // 存储/导出目录用接收端的有效 sessionId（发送端重载续传时沿用旧目录）
     const effSession = this.receiver.sessionId
-    this.events.onMeta(msg.files, effSession)
-    this.initRecord(msg, effSession, record?.files)
+    this.events.onMeta(clean.files, effSession)
+    this.initRecord(clean, effSession, record?.files)
     // 重启续传：记录中已完整的文件无需再收块——补发完成通知（UI 导出入口 + 发送端状态）
     for (const fileId of this.receiver.doneFileIds()) {
       this.events.onFileDone(fileId)

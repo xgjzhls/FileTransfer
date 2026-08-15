@@ -337,7 +337,154 @@ function pacedTransport(sent: SentFrame[], target: (f: Uint8Array) => void, paus
   return t
 }
 
-// ── 旧式单端测试（T05 回归） ────────────────────────────────────────────────
+describe('TransferController — 文件夹发送（SPEC §6.3 相对路径）', () => {
+  /** 文件夹场景：多个文件，name 为相对路径（含子目录）；构造真实字节源 */
+  function folderFiles(): {
+    files: { id: number; name: string; size: number; source: FileSource }[]
+    bytesOf: (name: string) => Uint8Array
+  } {
+    const enc = new TextEncoder()
+    const contents: Record<string, string> = {
+      'photos/2024/img.jpg': 'JPEGDATA',
+      'photos/readme.txt': 'read',
+      'top.txt': 'topfile',
+    }
+    const files = Object.entries(contents).map(([name, text], id) => {
+      const bytes = enc.encode(text)
+      return {
+        id,
+        name,
+        size: bytes.length,
+        source: { name, size: bytes.length, slice: async (s: number, e: number) => bytes.subarray(s, e) },
+      }
+    })
+    return { files, bytesOf: (n: string) => enc.encode(contents[n]) }
+  }
+
+  it('相对路径作为 meta name 传输：B 完整接收，字节与源一致', async () => {
+    const store = new FakeResumeStore()
+    const sinkB = new MemorySink()
+    const metaNames: string[] = []
+    // B→A 路由（resume_manifest 回程），避免等待 10s gate 超时
+    let senderTarget: (f: Uint8Array) => void = () => {}
+    const b = new TransferController(
+      sinkB,
+      { send: (f) => senderTarget(f), bufferedAmount: 0, onBufferedAmountLow: () => () => {} },
+      { ...noopEvents(), onMeta: (files) => metaNames.push(...files.map((x) => x.name)) },
+      store,
+    )
+
+    const sent: SentFrame[] = []
+    const a = makeSender(
+      {
+        send: (f) => {
+          const chunk = parseChunk(f)
+          sent.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+          b.handleData(f.buffer as ArrayBuffer)
+        },
+        bufferedAmount: 0,
+        onBufferedAmountLow: () => () => {},
+      },
+      noopEvents(),
+    )
+    senderTarget = (f) => a.handleData(f.buffer as ArrayBuffer)
+
+    const { files, bytesOf } = folderFiles()
+    await a.startSend(files)
+
+    // meta 名 = 相对路径（接收端据此建 OPFS 子目录）
+    expect(metaNames).toEqual(['photos/2024/img.jpg', 'photos/readme.txt', 'top.txt'])
+    // 全部 chunk 发出（8+4+7 字节，各 1 chunk），接收端三个 part 落盘校验完成
+    expect(sent.filter((s) => s.kind === 'chunk')).toHaveLength(3)
+    await waitUntil(() => sinkB.finalized.length === 3)
+    expect(sinkB.finalized).toHaveLength(3)
+    // 用实际 sessionId（a 随机生成）读回，字节与源一致
+    const sessionId = sinkB.finalized[0].split(':')[0]
+    for (let i = 0; i < 3; i++) {
+      const bytes = await sinkB.mergePart(sessionId, i, 0)
+      expect(new TextDecoder().decode(bytes)).toBe(new TextDecoder().decode(bytesOf(files[i].name)))
+    }
+  })
+
+  it('文件夹续传：发送端重载后按相对路径 name+size 匹配已收会话，只补缺失', async () => {
+    const store = new FakeResumeStore()
+    const sinkB = new MemorySink()
+    let senderTarget: (f: Uint8Array) => void = () => {}
+    const b = makeReceiver(sinkB, store, (f) => senderTarget(f))
+
+    // 文件夹：文件 0 为 300 chunk 大文件（相对路径），文件 1/2 小文件
+    const big = bigSource(CHUNK_SIZE * 300)
+    const enc = new TextEncoder()
+    const small1 = enc.encode('read')
+    const small2 = enc.encode('topfile')
+    const files = [
+      { id: 0, name: 'photos/big.bin', size: big.bytes.length, source: big.file.source },
+      {
+        id: 1,
+        name: 'photos/readme.txt',
+        size: small1.length,
+        source: {
+          name: 'photos/readme.txt',
+          size: small1.length,
+          slice: async (s: number, e: number) => small1.subarray(s, e),
+        },
+      },
+      {
+        id: 2,
+        name: 'top.txt',
+        size: small2.length,
+        source: {
+          name: 'top.txt',
+          size: small2.length,
+          slice: async (s: number, e: number) => small2.subarray(s, e),
+        },
+      },
+    ]
+
+    // 第一轮：meta + 块 0（256 chunk）发出后背压暂停 → 中断
+    const sent1: SentFrame[] = []
+    const t1 = pacedTransport(sent1, (f) => b.handleData(f.buffer as ArrayBuffer), 1 + CHUNKS_PER_BLOCK)
+    const a1 = makeSender(t1, noopEvents())
+    senderTarget = (f) => a1.handleData(f.buffer as ArrayBuffer)
+    const ac = new AbortController()
+    const p1 = a1.startSend(files, ac.signal)
+    await waitUntil(() => t1.meta !== null)
+    await waitUntil(() => partChunkCount(sinkB, 0, 0) >= CHUNKS_PER_BLOCK)
+    ac.abort()
+    t1.drain()
+    await expect(p1).rejects.toMatchObject({ name: 'AbortError' })
+    t1.pauseAfter = null
+    await new Promise((r) => setTimeout(r, 2100)) // 位图节流落盘
+    expect(store.records.size).toBe(1)
+    const sid = t1.meta!.sessionId
+
+    // 发送端重载：新实例新 sessionId，重新选同一文件夹 → 相对路径 name+size 匹配
+    const sent2: SentFrame[] = []
+    const a2 = makeSender(
+      {
+        send: (f) => {
+          const chunk = parseChunk(f)
+          sent2.push(chunk ? { kind: 'chunk', chunkIndex: chunk.chunkIndex } : { kind: 'control' })
+          b.handleData(f.buffer as ArrayBuffer)
+        },
+        bufferedAmount: 0,
+        onBufferedAmountLow: () => () => {},
+      },
+      noopEvents(),
+    )
+    senderTarget = (f) => a2.handleData(f.buffer as ArrayBuffer)
+    await a2.startSend(files)
+
+    // 文件 0 只补块 1（44 chunk）；文件 1/2 全发（各 1 chunk）—— 相对路径匹配命中
+    expect(sent2.filter((s) => s.kind === 'chunk')).toHaveLength(300 - CHUNKS_PER_BLOCK + 2)
+    await waitUntil(() => sinkB.finalized.length === 3)
+    expect(sinkB.finalized).toHaveLength(3)
+    // 接收端沿用第一轮会话目录（重载匹配），字节与源一致
+    expect(await sha256Hex(sinkB.mergePart(sid, 0, 0))).toBe(await sha256Hex(big.bytes))
+    expect(new TextDecoder().decode(await sinkB.mergePart(sid, 1, 0))).toBe('read')
+    expect(new TextDecoder().decode(await sinkB.mergePart(sid, 2, 0))).toBe('topfile')
+  })
+})
 
 describe('TransferController — 接收路径', () => {
   it('接收 chunk → onRecvProgress 上报', async () => {
