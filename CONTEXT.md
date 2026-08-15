@@ -39,6 +39,8 @@
 - [ADR-0003](decisions/adr/0003-https-bootstrap-pwa.md)：HTTPS 引导 + PWA 离线安装
 - [ADR-0004](decisions/adr/0004-signaling-dual-channel.md)：信令双通道 —— 在线发现 + 离线二维码兜底
 - [ADR-0005](decisions/adr/0005-resume-and-datachannel.md)：传输协议 —— bitfield 粒度续传 + ordered DataChannel
+- [ADR-0006](decisions/adr/0006-symmetric-pin-discovery.md)：发现与配对 —— 对称 PIN 房间 + 离线扫码兜底
+- [ADR-0007](decisions/adr/0007-offline-pairing-two-hop.md)：离线配对保持「两跳」——拒绝一扫码旁路（**完全离线是用户主场景**）
 
 ## 规格说明
 - **[SPEC.md](SPEC.md)** 为传输协议、存储层、信令、UI、PWA 的正式规格（v1 定稿）。协议细节（消息 schema、状态机、续传握手、参数表）以 SPEC 为准，本文件不再重复维护草案。
@@ -48,7 +50,7 @@
 - 续传：自动续传（在线自动重连；离线重新扫码后从最后完整部分继续，不重传已收数据）→ 粒度定为 64MiB 续传块 bitfield（ADR-0005；2026-08-14 修订：传输帧 256KiB，bitfield 粒度 64MiB）
 - 接收去向：「文件」App + 「照片」库（图片/小视频 <~300MB 经 Web Share 存照片；大视频/大文件存「文件」App，由用户经 Files 分享面板导入照片）
 - 安全：物理在场 / 房间码在场即足够，不设额外 PIN（ADR-0006 后房间码即「对称 PIN」，语义不变）
-- 发现与配对体验（ADR-0006，已接受）：在线 = 对称 PIN 房间（输同码即自动建房/加入，无创建/加入之分；记住上次房间自动回房）；离线 = QR 扫码兜底（轻量打磨：自动判定角色、扫码重试、错误提示）；不做局域网中继，接受「纯离线无设备列表」（浏览器技术限制，研究核实）
+- 发现与配对体验（ADR-0006，已接受；ADR-0007 补充）：**完全离线是用户主场景**，离线配对不是兜底而是常态。在线 = 对称 PIN 房间（输同码即自动建房/加入，无创建/加入之分；记住上次房间自动回房）；离线 = QR 两跳配对（两跳是纯浏览器物理上限——WebRTC 需双向 SDP，无法少于两次码交换，ADR-0007；打磨：自动判定角色、扫码重试、错误提示、第二跳回码体验优化）；已明确拒绝一扫码旁路（桌面信令帮手 / 音频配对，理由见 ADR-0007）；不做局域网中继，接受「纯离线无设备列表」（浏览器技术限制）
 - 引导：接受「每台设备联网打开一次」（方案 A 隐含）
 - DataChannel：ordered:true + reliable（v1；[v2] unordered）→ ADR-0005
 
@@ -74,6 +76,8 @@
 - **presence**：设备在线状态广播，由信令服务分发给同房间设备
 - **引导 bootstrap**：首次把 PWA 装到设备（联网一次，SW 缓存全部资源），之后永久离线可用
 - **信令**：WebRTC 建连前的 SDP 交换；本项目用二维码完成
+- **回码**：离线配对第二跳的载体——扫到对方 offer 码后生成的 answer 回执，以二维码或文本形式返回对方（ADR-0007 的打磨对象）
+- **配对跳（hop）**：离线配对中一次「屏幕 → 摄像头」的单向码交换；WebRTC 需双向 SDP，纯浏览器离线至少两跳（offer 跳 + answer 跳），无法少于两跳（ADR-0007）
 - **部分 part**：文件按 ~512MB 切成的存储 / 续传粒度，独立校验
 - **chunk / 帧**：传输层小分块（256KiB-64，DataChannel maxMessageSize 262144 硬上限），单条 DataChannel 消息；背压粒度
 - **续传块（64MiB）**：bitfield 粒度单位，1 bit = 256 帧；每 part（512MiB）8 块；崩溃最多重传 64MiB + 在途

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { pairButtonLabels, pairGuide, primaryPairAction } from './pairGuide'
+import {
+  pairButtonLabels,
+  pairGuide,
+  pairPolishLabels,
+  primaryPairAction,
+  rePairAction,
+} from './pairGuide'
 
 /**
  * pairGuide（T14）—— 设备分工默认主路径 + 引导文案纯逻辑测试。
@@ -69,5 +75,67 @@ describe('pairButtonLabels — pick 页按钮文案（T14）', () => {
     expect(l.offerLabel).toBe('显示配对码')
     expect(l.scanLabel).toBe('扫码配对')
     expect(pairButtonLabels('tablet')).toEqual(l)
+  })
+})
+
+describe('pairPolishLabels — T16/T17 两跳打磨文案（ADR-0007）', () => {
+  it('断线快捷重配：重新配对按钮 + 续传提示文案就位（T17）', () => {
+    const p = pairPolishLabels()
+    expect(p.rePairLabel).toBe('重新配对')
+    expect(p.disconnectedWarning).toMatch(/连接已断开/)
+    expect(p.disconnectedWarning).toMatch(/续传|断点/)
+  })
+
+  it('回码一键分享：分享按钮 + 降级提示就位（T16）', () => {
+    const p = pairPolishLabels()
+    expect(p.shareAnswerLabel).toBe('分享回码')
+    expect(p.shareFallbackMsg).toMatch(/复制配对码/)
+  })
+
+  it('桌面 offer 页主次重排：粘贴为唯一主操作，扫码降为次要入口（T17）', () => {
+    const p = pairPolishLabels()
+    // 主操作标题强调「粘贴回码」且指向手机回码
+    expect(p.desktopPasteTitle).toMatch(/回码.*粘贴|粘贴.*回码/)
+    expect(p.desktopPasteTitle).toMatch(/主路径/)
+    // 扫码降级为 details 折叠入口（非按钮平级）
+    expect(p.desktopScanSummary).toContain('扫码对方的回码')
+    // 重新生成/复制/扫码/停止 标签集中，UI 不得另造文案
+    expect(p.regenerateLabel).toBe('重新生成')
+    expect(p.copyCodeLabel).toBe('复制配对码')
+    expect(p.scanAnswerLabel).toBe('扫码对方的回码')
+    expect(p.stopScanLabel).toBe('停止扫码')
+    expect(p.startScanLabel).toBe('开始扫码')
+    // 无摄像头手动粘贴入口文案集中（手机 offer-show 贴接收端回码 / scan-wait 贴发送端码）
+    expect(p.mobilePasteSummary).toContain('手动粘贴')
+    expect(p.mobilePasteSummary).toMatch(/接收端/)
+    expect(p.scanWaitPasteSummary).toMatch(/发送端/)
+    expect(p.scanWaitPasteSummary).not.toBe(p.mobilePasteSummary)
+  })
+
+  it('断线重配保留 answerer 引导文案（等对方重新出码，不切角色）', () => {
+    const p = pairPolishLabels()
+    expect(p.rePairScanMsg).toMatch(/重新.*出码|对方重新/)
+  })
+})
+
+describe('rePairAction — 断线快捷重配保持本端角色（T17）', () => {
+  it('offerer（offer-show）→ 重新出码', () => {
+    expect(rePairAction('offer-show')).toBe('offer')
+  })
+
+  it('offerer 配对完成等待中（done）→ 重新出码', () => {
+    expect(rePairAction('done')).toBe('offer')
+  })
+
+  it('answerer（answer-show）→ 保持接收角色，扫对方新码', () => {
+    expect(rePairAction('answer-show')).toBe('scan')
+  })
+
+  it('answerer（scan-wait）→ 保持接收角色', () => {
+    expect(rePairAction('scan-wait')).toBe('scan')
+  })
+
+  it('pick（角色已随收起重置）→ 默认按本端出码开始（不重走 pick）', () => {
+    expect(rePairAction('pick')).toBe('offer')
   })
 })

@@ -20,9 +20,17 @@
  * T14 设备分工（SPEC §5.3）：按设备类型给默认主路径——电脑（无摄像头）默认
  * 「显示配对码」、手机/平板默认「扫码」，pick 页三步引导（电脑显示 → 手机扫屏
  * → 回码经微信/文件发回电脑粘贴），两向均可手动切换。
+ *
+ * T16 回码打磨（SPEC §5.3 / ADR-0007）：answer 端回码全屏（min(80vw,360px)）+
+ * 「分享回码」一键 navigator.share({ text })，失败降级复制（src/qr/shareCode.ts）。
+ *
+ * T17 断线快捷重配（SPEC §5.3 / ADR-0007）：断线警告旁「重新配对」一步回本端 offer
+ * 页（保持角色，不重走 pick）+ 自动重新生成配对码；桌面 offer 页主次重排——粘贴为
+ * 唯一主操作、扫码降为 details 入口、重新生成收进角落（手机端 offer 页保持现状）。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import { decodeQrText, encodeQrText } from '../qr/qrCodec'
 import { renderQrToCanvas } from '../qr/qrRender'
 import { startQrScanner } from '../qr/qrScan'
@@ -30,13 +38,21 @@ import type { QrScannerHandle } from '../qr/qrScan'
 import { routeScannedCode } from '../qr/scanRoute'
 import type { ScanPhase } from '../qr/scanRoute'
 import { cameraErrorText } from '../qr/scanErrors'
-import { pairButtonLabels, pairGuide, primaryPairAction } from '../qr/pairGuide'
+import {
+  pairButtonLabels,
+  pairGuide,
+  pairPolishLabels,
+  primaryPairAction,
+  rePairAction,
+} from '../qr/pairGuide'
+import type { PairPhase } from '../qr/pairGuide'
+import { answerQrMaxWidth, detectShareCapability, sharePairCode } from '../qr/shareCode'
 import { detectKind } from '../device'
 import type { ConnectionManager } from '../webrtc/connection'
 import type { SignalPayload } from '../protocol/signaling'
 import type { DeviceKind } from '../protocol/signaling'
 
-type Phase = 'pick' | 'offer-show' | 'scan-wait' | 'answer-show' | 'done'
+type Phase = PairPhase
 
 interface OfflinePairProps {
   /** 获取（惰性创建）共享 ConnectionManager；数据面事件已由 Home 接线 */
@@ -49,12 +65,21 @@ interface OfflinePairProps {
 
 export default function OfflinePair({ manager, connState, deviceKind }: OfflinePairProps) {
   const [open, setOpen] = useState(false)
+  /** 本次挂载是否打开过配对面板：离线断连警告仅在用过离线配对后出现（不打扰纯在线用户） */
+  const [everOpened, setEverOpened] = useState(false)
   const [phase, setPhase] = useState<Phase>('pick')
+  /** e2e 测试钩子（DEV 仅）：可覆盖 connState 以验证断线快捷重配（T17） */
+  const [connOverride, setConnOverride] = useState<string | null>(null)
+  const effectiveConn = connOverride ?? connState
   // T14 设备分工：本端默认主路径与引导文案（手机扫码 / 电脑出码）
   const kind = useMemo(() => deviceKind ?? detectKind(), [deviceKind])
   const primary = primaryPairAction(kind)
   const guide = pairGuide(kind)
   const buttonLabels = pairButtonLabels(kind)
+  /** T16/T17 打磨文案（按钮标签/提示集中一处，便于单测与改文案） */
+  const polish = pairPolishLabels()
+  /** T16：navigator.share 能力探测（非安全上下文 / 老浏览器 → 降级复制） */
+  const shareCapability = useMemo(() => detectShareCapability(), [])
   const [offerText, setOfferText] = useState('')
   const [answerText, setAnswerText] = useState('')
   const [pasteInput, setPasteInput] = useState('')
@@ -81,12 +106,13 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
     phaseRef.current = phase
   }, [phase])
 
-  // e2e 测试钩子（仅 DEV）：读取本端生成的 offer / answer 文本
+  // e2e 测试钩子（仅 DEV）：读取本端生成的 offer / answer 文本；模拟断线（T17 重配入口）
   useEffect(() => {
     if (!import.meta.env.DEV) return
     const hook = {
       getOfferText: () => offerTextRef.current,
       getAnswerText: () => answerTextRef.current,
+      setConnStateForTest: (s: string | null) => setConnOverride(s),
     }
     ;(window as unknown as { __ltQr?: typeof hook }).__ltQr = hook
     return () => {
@@ -142,7 +168,7 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
   // 配对成功（连接已建立，且本次连接由 QR 流程推进）→ 明确反馈 + 短暂提示后自动收起。
   // pairedRef 门控：面板开着但连接来自在线 WS（点选设备）时不误报、不误收起。
   useEffect(() => {
-    if (connState !== 'connected' || !pairedRef.current) return
+    if (effectiveConn !== 'connected' || !pairedRef.current) return
     if (phase === 'offer-show' || phase === 'answer-show' || phase === 'done') {
       setErr('')
       setMsg('配对成功，正在建立连接…')
@@ -152,7 +178,7 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
       }, 1500)
       return () => clearTimeout(t)
     }
-  }, [connState, phase])
+  }, [effectiveConn, phase])
 
   // 面板收起时确保停掉摄像头
   useEffect(() => {
@@ -271,7 +297,39 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
     }
   }
 
-  const offlineDisconnected = connState === 'failed' || connState === 'disconnected'
+  /**
+   * T16：分享回码——navigator.share({ text }) 一键分享到微信/文件传输（iOS 支持文本分享），
+   * 省掉「复制 → 切 app → 粘贴」；不支持 / 抛错 / 用户取消 → 降级提示用「复制配对码」。
+   */
+  async function shareAnswer(): Promise<void> {
+    setCopyMsg('')
+    const outcome = await sharePairCode(answerText, shareCapability)
+    if (outcome === 'shared') {
+      setCopyMsg('已分享：等待对端粘贴回码')
+    } else {
+      setCopyMsg(polish.shareFallbackMsg)
+    }
+  }
+
+  /**
+   * T17：断线快捷重配——不重走 pick 页，按本端角色一步续配：
+   * offerer 重新出码；answerer 保持接收角色，等对方重新「显示配对码」后扫新码。
+   * 重配后由现有 resume_manifest 流程从 bitfield 断点续传。
+   */
+  async function rePair(): Promise<void> {
+    setErr('')
+    setCopyMsg('')
+    if (rePairAction(phaseRef.current) === 'scan') {
+      setMsg(polish.rePairScanMsg)
+      setPhase('scan-wait')
+      setScanning(true)
+      return
+    }
+    setScanning(false)
+    await generateOffer()
+  }
+
+  const offlineDisconnected = effectiveConn === 'failed' || effectiveConn === 'disconnected'
 
   return (
     <section className="card">
@@ -288,15 +346,34 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
         手机↔手机仍是一台显示、一台扫码。数据仍是局域网 P2P 直连。
       </p>
 
+      {/* T17 断线快捷重配：警告旁直接提供「重新配对」——面板收起（配对成功自动收起后断线）也可见；
+          仅对用过离线配对的会话显示，纯在线用户不受打扰 */}
+      {everOpened && offlineDisconnected && (
+        <div
+          className="row"
+          style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginTop: 8 }}
+        >
+          <p className="bad" style={{ margin: 0, flex: 1 }}>{polish.disconnectedWarning}</p>
+          <button
+            onClick={() => void rePair()}
+            style={{ padding: '6px 12px', fontSize: 12, whiteSpace: 'nowrap' }}
+          >
+            {polish.rePairLabel}
+          </button>
+        </div>
+      )}
+
       {!open ? (
-        <button onClick={() => setOpen(true)}>离线扫码配对</button>
+        <button
+          onClick={() => {
+            setEverOpened(true)
+            setOpen(true)
+          }}
+        >
+          离线扫码配对
+        </button>
       ) : (
         <div style={{ marginTop: 8 }}>
-          {offlineDisconnected && (
-            <p className="bad">
-              ⚠ 连接已断开：重新配对后自动续传（只补缺失部分，不重传已收数据）。
-            </p>
-          )}
           {msg && <p className="ok">{msg}</p>}
           {err && <p className="bad">{err}</p>}
 
@@ -336,51 +413,108 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
           {phase === 'offer-show' && (
             <>
               <p className="muted">发送端配对码（对方扫码，或手动发送文本）：</p>
+              {/* T17 桌面端：重新生成收进角落（二维码上方的次级入口，不喧宾夺主） */}
+              {kind === 'desktop' && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                  <button
+                    onClick={() => void generateOffer()}
+                    style={{ padding: '2px 10px', fontSize: 11, opacity: 0.55 }}
+                  >
+                    {polish.regenerateLabel}
+                  </button>
+                </div>
+              )}
               <div style={{ textAlign: 'center' }}>
                 <canvas
                   ref={canvasRef}
                   style={{ maxWidth: 260, width: '100%', background: '#fff', borderRadius: 8, padding: 4 }}
                 />
               </div>
-              <div className="row" style={{ marginTop: 8 }}>
-                <button
-                  onClick={() => void generateOffer()}
-                  style={{ padding: '6px 12px', fontSize: 12 }}
-                >
-                  重新生成
-                </button>
-                <button
-                  onClick={() => {
-                    if (!scanning) {
-                      setErr('')
-                      setScanning(true)
-                    } else setScanning(false)
-                  }}
-                  style={{ padding: '6px 12px', fontSize: 12 }}
-                >
-                  {scanning ? '停止扫码' : '扫码对方的回码'}
-                </button>
-                <button onClick={() => void copyText(offerText)} style={{ padding: '6px 12px', fontSize: 12 }}>
-                  复制配对码
-                </button>
-                {copyMsg && <span className="ok" style={{ fontSize: 12 }}>{copyMsg}</span>}
-              </div>
               {kind === 'desktop' ? (
-                <div style={{ marginTop: 8 }}>
-                  <p className="muted" style={{ fontSize: 12 }}>手机发来的回码粘贴到这里：</p>
-                  <PasteBox
-                    value={pasteInput}
-                    onChange={setPasteInput}
-                    onSubmit={() => void applyPaste()}
-                  />
-                </div>
+                /* T17 桌面端主次重排：粘贴为唯一主操作（视觉突出），扫码折叠为次要入口 */
+                <>
+                  <div className="row" style={{ marginTop: 8, justifyContent: 'center' }}>
+                    <button
+                      onClick={() => void copyText(offerText)}
+                      style={{ padding: '6px 12px', fontSize: 12, opacity: 0.75 }}
+                    >
+                      {polish.copyCodeLabel}
+                    </button>
+                    {copyMsg && <span className="ok" style={{ fontSize: 12 }}>{copyMsg}</span>}
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <p className="muted" style={{ fontSize: 12 }}>{polish.desktopPasteTitle}</p>
+                    <PasteBox
+                      value={pasteInput}
+                      onChange={setPasteInput}
+                      onSubmit={() => void applyPaste()}
+                      highlight
+                    />
+                  </div>
+                  <details style={{ marginTop: 8 }}>
+                    <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
+                      {polish.desktopScanSummary}
+                    </summary>
+                    {scanning ? (
+                      <>
+                        <ScannerVideo videoRef={videoRef} />
+                        <button
+                          onClick={() => setScanning(false)}
+                          style={{ padding: '6px 12px', fontSize: 12, marginTop: 6 }}
+                        >
+                          {polish.stopScanLabel}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setErr('')
+                          setScanning(true)
+                        }}
+                        style={{ padding: '6px 12px', fontSize: 12, marginTop: 6 }}
+                      >
+                        {polish.scanAnswerLabel}
+                      </button>
+                    )}
+                  </details>
+                </>
               ) : (
-                <details style={{ marginTop: 8 }}>
-                  <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
-                    没有摄像头？手动粘贴接收端的配对码
-                  </summary>
-                  <PasteBox value={pasteInput} onChange={setPasteInput} onSubmit={() => void applyPaste()} />
-                </details>
+                /* 手机端保持现状主操作：扫码在按钮区（手机↔手机仍以扫码为便），不受桌面重排影响 */
+                <>
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <button
+                      onClick={() => void generateOffer()}
+                      style={{ padding: '6px 12px', fontSize: 12 }}
+                    >
+                      {polish.regenerateLabel}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!scanning) {
+                          setErr('')
+                          setScanning(true)
+                        } else setScanning(false)
+                      }}
+                      style={{ padding: '6px 12px', fontSize: 12 }}
+                    >
+                      {scanning ? polish.stopScanLabel : polish.scanAnswerLabel}
+                    </button>
+                    <button
+                      onClick={() => void copyText(offerText)}
+                      style={{ padding: '6px 12px', fontSize: 12 }}
+                    >
+                      {polish.copyCodeLabel}
+                    </button>
+                    {copyMsg && <span className="ok" style={{ fontSize: 12 }}>{copyMsg}</span>}
+                  </div>
+                  {scanning && <ScannerVideo videoRef={videoRef} />}
+                  <details style={{ marginTop: 8 }}>
+                    <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
+                      {polish.mobilePasteSummary}
+                    </summary>
+                    <PasteBox value={pasteInput} onChange={setPasteInput} onSubmit={() => void applyPaste()} />
+                  </details>
+                </>
               )}
             </>
           )}
@@ -391,14 +525,7 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
               <p className="muted" style={{ fontSize: 12 }}>
                 提示：把二维码完整放入取景框，码的边缘留出边距，不要贴太近。
               </p>
-              {scanning && (
-                <video
-                  ref={videoRef}
-                  playsInline
-                  muted
-                  style={{ width: '100%', maxWidth: 320, borderRadius: 8, background: '#000' }}
-                />
-              )}
+              {scanning && <ScannerVideo videoRef={videoRef} />}
               <div className="row" style={{ marginTop: 8 }}>
                 <button
                   onClick={() => {
@@ -409,7 +536,7 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
                   }}
                   style={{ padding: '6px 12px', fontSize: 12 }}
                 >
-                  {scanning ? '停止扫码' : '开始扫码'}
+                  {scanning ? polish.stopScanLabel : polish.startScanLabel}
                 </button>
                 {!scanning && (
                   <button
@@ -425,7 +552,7 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
               </div>
               <details style={{ marginTop: 8 }}>
                 <summary className="muted" style={{ cursor: 'pointer', fontSize: 12 }}>
-                  没有摄像头？手动粘贴发送端的配对码
+                  {polish.scanWaitPasteSummary}
                 </summary>
                 <PasteBox value={pasteInput} onChange={setPasteInput} onSubmit={() => void applyPaste()} />
               </details>
@@ -438,7 +565,14 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
               <div style={{ textAlign: 'center' }}>
                 <canvas
                   ref={canvasRef}
-                  style={{ maxWidth: 260, width: '100%', background: '#fff', borderRadius: 8, padding: 4 }}
+                  style={{
+                    /* T16：回码放大至可用屏宽（min(80vw,360px)），offer 端回扫/回拍更容易扫中 */
+                    maxWidth: answerQrMaxWidth(),
+                    width: '100%',
+                    background: '#fff',
+                    borderRadius: 8,
+                    padding: 4,
+                  }}
                 />
               </div>
               <div className="row" style={{ marginTop: 8 }}>
@@ -453,8 +587,17 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
                 >
                   重扫/重粘发送端配对码
                 </button>
-                <button onClick={() => void copyText(answerText)} style={{ padding: '6px 12px', fontSize: 12 }}>
-                  复制配对码
+                <button
+                  onClick={() => void shareAnswer()}
+                  style={{ padding: '6px 12px', fontSize: 12 }}
+                >
+                  {polish.shareAnswerLabel}
+                </button>
+                <button
+                  onClick={() => void copyText(answerText)}
+                  style={{ padding: '6px 12px', fontSize: 12 }}
+                >
+                  {polish.copyCodeLabel}
                 </button>
                 {copyMsg && <span className="ok" style={{ fontSize: 12 }}>{copyMsg}</span>}
               </div>
@@ -473,15 +616,17 @@ function scanPhaseOf(phase: Phase): ScanPhase {
   return phase === 'offer-show' ? 'offer-show' : 'scan-wait'
 }
 
-/** 手动粘贴输入框 + 应用按钮（offer-show / scan-wait 复用） */
+/** 手动粘贴输入框 + 应用按钮（offer-show / scan-wait 复用）；highlight 用于桌面主操作（T17 视觉突出） */
 function PasteBox({
   value,
   onChange,
   onSubmit,
+  highlight = false,
 }: {
   value: string
   onChange: (v: string) => void
   onSubmit: () => void
+  highlight?: boolean
 }) {
   return (
     <div className="row" style={{ marginTop: 6 }}>
@@ -494,16 +639,28 @@ function PasteBox({
           flex: 1,
           background: '#0d0f13',
           color: 'var(--text)',
-          border: '1px solid var(--line)',
+          border: highlight ? '1.5px solid var(--accent)' : '1px solid var(--line)',
           borderRadius: 8,
-          padding: 8,
+          padding: highlight ? 10 : 8,
           fontFamily: 'ui-monospace, Menlo, monospace',
           fontSize: 11,
         }}
       />
-      <button onClick={onSubmit} style={{ padding: '6px 12px', fontSize: 12 }}>
+      <button onClick={onSubmit} style={{ padding: highlight ? '10px 16px' : '6px 12px', fontSize: 12 }}>
         应用
       </button>
     </div>
+  )
+}
+
+/** 扫码取景（offer-show / scan-wait 复用；ref 由父级提供，摄像头生命周期在 OfflinePair） */
+function ScannerVideo({ videoRef }: { videoRef: RefObject<HTMLVideoElement | null> }) {
+  return (
+    <video
+      ref={videoRef}
+      playsInline
+      muted
+      style={{ width: '100%', maxWidth: 320, borderRadius: 8, background: '#000', marginTop: 6 }}
+    />
   )
 }

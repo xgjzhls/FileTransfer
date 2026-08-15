@@ -314,6 +314,29 @@ try {
   const answerText = await pageB.evaluate(() => window.__ltQr.getAnswerText())
   step('T13 接收端免选角色直接扫码：识别 offer 自动生成回码', answerText.length > 0, `${answerText.length} 字符`)
 
+  // T16 回码全屏 + 一键分享：answer 端二维码放大至 min(80vw,360px)、新增「分享回码」按钮
+  const shareBtnCount = await pageB.getByRole('button', { name: '分享回码' }).count()
+  const answerCanvas = await pageB.evaluate(() => {
+    const c = document.querySelector('canvas')
+    if (!c) return null
+    return {
+      cssMaxWidth: c.style.maxWidth,
+      computedMaxWidth: getComputedStyle(c).maxWidth, // min() 由浏览器解析成像素
+      boxWidth: c.getBoundingClientRect().width, // 含 padding 的实际渲染宽
+    }
+  })
+  step(
+    'T16 回码全屏 + 分享回码按钮（answer 端）',
+    shareBtnCount === 1 &&
+      answerCanvas !== null &&
+      answerCanvas.cssMaxWidth === 'min(80vw, 360px)' &&
+      parseFloat(answerCanvas.computedMaxWidth) >= 320 && // 桌面视口下 min() 解析为 360px
+      answerCanvas.boxWidth > 260, // 比旧 260px 上限明显放大（可完整扫描）
+    answerCanvas
+      ? `渲染宽 ${answerCanvas.boxWidth.toFixed(0)}px（computed ${answerCanvas.computedMaxWidth}）`
+      : '无 canvas',
+  )
+
   // A 粘贴 answer（T14 电脑端回码粘贴框常驻，无需展开 details；两端完成 SDP 交换）
   await pageA.getByPlaceholder('粘贴或输入配对码文本').fill(answerText)
   await pageA.getByRole('button', { name: '应用' }).click()
@@ -342,6 +365,36 @@ try {
       `最终状态 ${finalState || '未知'}；本机 ICE 不可达，跳过 connected/传输断言`,
     )
   }
+
+  // ── 5.8 T17 断线快捷重配：断线警告旁「重新配对」→ 一步回 offer 页 + 重新生成配对码
+  // 面板状态因环境而异（降级停在 done / 全量成功自动收起）：收起时先重新打开
+  const openBtn = await pageA.getByRole('button', { name: '离线扫码配对' }).count()
+  if (openBtn > 0) await pageA.getByRole('button', { name: '离线扫码配对' }).click()
+  // 模拟离线断连（DEV 钩子覆盖 connState）→ 断线警告 + 重新配对按钮出现
+  await pageA.evaluate(() => window.__ltQr?.setConnStateForTest('disconnected'))
+  await pageA.getByRole('button', { name: '重新配对' }).waitFor({ timeout: 10000 })
+  const offerBeforeRePair = await pageA.evaluate(() => window.__ltQr.getOfferText())
+  await pageA.getByRole('button', { name: '重新配对' }).click()
+  // 一步回到本端 offer 页（不重走 pick）：桌面主操作「粘贴回码」标题可见即 offer-show
+  // （generateOffer 在生成新码后才切相位，标题出现即新码已就绪）
+  await pageA.getByText('把手机显示的回码粘贴到这里（电脑主路径）：').waitFor({ timeout: 10000 })
+  const offerAfterRePair = await pageA.evaluate(() => window.__ltQr.getOfferText())
+  const backOnOffer = await pageA.getByText('把手机显示的回码粘贴到这里（电脑主路径）：').count()
+  step(
+    'T17 重新配对：断线警告旁按钮 → 一步回 offer 页并重新生成配对码',
+    backOnOffer === 1 && offerAfterRePair.length > 0 && offerAfterRePair !== offerBeforeRePair,
+    `重生成 ${offerAfterRePair.length} 字符`,
+  )
+  await pageA.evaluate(() => window.__ltQr?.setConnStateForTest(null))
+
+  // T17 保持本端角色：answerer（B 在 answer-show）断线重配 → 回扫码相位等对方重新出码（不切 offerer）
+  await pageB.evaluate(() => window.__ltQr?.setConnStateForTest('disconnected'))
+  await pageB.getByRole('button', { name: '重新配对' }).waitFor({ timeout: 10000 })
+  await pageB.getByRole('button', { name: '重新配对' }).click()
+  await pageB.getByText('扫描发送端的配对码').waitFor({ timeout: 10000 })
+  const stayedAnswerer = (await pageB.getByText('扫描发送端的配对码').count()) === 1
+  await pageB.evaluate(() => window.__ltQr?.setConnStateForTest(null))
+  step('T17 重新配对保持本端角色：answerer 回扫码相位（不切 offerer）', stayedAnswerer)
 
   // ── 6. 杀 WS → 自动重连 → 房间码/设备列表恢复（T09 + T10）
   // T09：A 的 WS 被外力断开 → 指数退避自动重连 + 重新 join 原房间。

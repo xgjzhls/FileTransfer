@@ -101,9 +101,11 @@ async function main() {
     if (!r.ok) throw new Error('port up but bad response')
     console.log('[qr-loop] 复用已运行的 dev server')
   } catch {
-    dev = spawn('npx', ['vite', '--port', PORT, '--strictPort'], {
-      cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    const bin = process.env.LOOP_SERVE === 'preview' ? 'vite' : 'npx'
+    const args = process.env.LOOP_SERVE === 'preview'
+      ? ['preview', '--port', PORT, '--strictPort']
+      : ['vite', '--port', PORT, '--strictPort']
+    dev = spawn(bin, args, { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] })
     await waitForServer(BASE, 60000)
   }
 
