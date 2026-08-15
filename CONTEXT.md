@@ -29,7 +29,7 @@
 ## 部署现状（T01 起）
 - 托管：GitHub Pages（https://xgjzhls.github.io/FileTransfer/），**legacy 模式**（Deploy from a branch）
 - 源：**main 分支**的 `/docs` 目录（提交的是构建产物）——Pages 设置需指向 main
-- 流程：改代码 → `npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && rm -f docs/sw.ts && touch docs/.nojekyll` → 提交推送（Pages 自动重建）
+- 流程：改代码 → `npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && rm -f docs/sw.ts && touch docs/.nojekyll` → **恢复代理文档 `git checkout HEAD -- docs/agents`（docs/ 同时承载 docs/agents/*.md，rm -rf 会误删）** → 提交推送（Pages 自动重建）
 - SW：vite-plugin-pwa injectManifest（`public/sw.ts` → dist/sw.js，预缓存全部资源 + spike 流式逻辑）
 - 注意：早期试过 Actions workflow + deploy-pages，因 `github-pages` 环境的 branch_policy 拦截失败，已弃用；正式版可回归 Actions 模式（需先改环境策略）
 
