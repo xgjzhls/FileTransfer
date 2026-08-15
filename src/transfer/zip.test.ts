@@ -1,96 +1,84 @@
 /**
- * zip.ts —— store-only zip 写入器单测。
- * 结构自解析验证（本地文件头/中央目录/CRC/偏移），并对已知向量校验 CRC-32。
+ * zip.ts —— deflate 压缩 zip 写入器单测。
+ * 回读用 fflate 的 unzipSync（与生产同库，验证打包/解包对称）；
+ * 另验证压缩生效（可压缩内容 zip 显著变小）与条目预检。
  */
 
 import { describe, expect, it } from 'vitest'
-import { buildStoreZip, crc32, assertZipEntries, ZIP_MAX_ENTRY_BYTES } from './zip'
-import type { ZipEntry } from './zip'
+import { unzipSync } from 'fflate'
+import { buildZip, assertZipEntries, ZIP_MAX_ENTRY_BYTES, ZIP_LEVEL } from './zip'
+import type { ZipEntry, ZipLevel } from './zip'
 
-function le32(dv: DataView, at: number): number {
-  return dv.getUint32(at, true)
-}
-function le16(dv: DataView, at: number): number {
-  return dv.getUint16(at, true)
-}
-
-/** 最小 zip 解析器：走中央目录 → 本地头 → 数据，返回 {name, data}[] */
-async function parseZip(blob: Blob): Promise<{ name: string; data: Uint8Array }[]> {
-  const buf = new Uint8Array(await blob.arrayBuffer())
-  const dv = new DataView(buf.buffer)
-  const eocd = buf.byteLength - 22 // 无注释：EOCD 恒为末 22 字节
-  expect(le32(dv, eocd)).toBe(0x06054b50)
-  const count = le16(dv, eocd + 10)
-  let at = le32(dv, eocd + 16)
-  const out: { name: string; data: Uint8Array }[] = []
-  for (let i = 0; i < count; i++) {
-    expect(le32(dv, at)).toBe(0x02014b50) // 中央目录头
-    const nameLen = le16(dv, at + 28)
-    const size = le32(dv, at + 24)
-    const compSize = le32(dv, at + 20)
-    const crc = le32(dv, at + 16)
-    const localAt = le32(dv, at + 42)
-    expect(compSize).toBe(size) // store：压缩=未压缩
-    const name = new TextDecoder().decode(buf.subarray(at + 46, at + 46 + nameLen))
-    // 本地文件头
-    expect(le32(dv, localAt)).toBe(0x04034b50)
-    const lNameLen = le16(dv, localAt + 26)
-    const lMethod = le16(dv, localAt + 8)
-    expect(lMethod).toBe(0)
-    const data = new Uint8Array(buf.subarray(localAt + 30 + lNameLen, localAt + 30 + lNameLen + size))
-    expect(crc32(data)).toBe(crc)
-    out.push({ name, data })
-    at += 46 + nameLen
-  }
-  return out
+function entry(path: string, content: string | Uint8Array): ZipEntry {
+  const raw = typeof content === 'string' ? new TextEncoder().encode(content) : content
+  return { path, data: new Uint8Array(raw) } // 复制为 ArrayBuffer 支撑（TS7 typed array）
 }
 
-function entry(path: string, content: string): ZipEntry {
-  return { path, data: new Uint8Array(new TextEncoder().encode(content)) }
+/** 打包并解回 → {name: data} 映射 */
+async function roundTrip(entries: ZipEntry[], level?: ZipLevel): Promise<Map<string, Uint8Array>> {
+  const blob = await buildZip(entries, level)
+  expect(blob.type).toBe('application/zip')
+  const out = unzipSync(new Uint8Array(await blob.arrayBuffer()))
+  return new Map(Object.entries(out))
 }
 
-describe('crc32 — 已知向量（IEEE 802.3）', () => {
-  it('标准向量', () => {
-    expect(crc32(new Uint8Array())).toBe(0x00000000)
-    expect(crc32(new TextEncoder().encode('a'))).toBe(0xe8b7be43)
-    expect(crc32(new TextEncoder().encode('123456789'))).toBe(0xcbf43926)
-  })
-})
-
-describe('buildStoreZip — 结构自解析回读（SPEC §4 文件夹导出）', () => {
-  it('空条目：合法空 zip（仅 EOCD）', async () => {
-    const entries = await parseZip(buildStoreZip([]))
-    expect(entries).toEqual([])
+describe('buildZip — deflate 压缩 + 结构回读（SPEC §4 文件夹导出）', () => {
+  it('空条目：合法空 zip', async () => {
+    expect((await roundTrip([])).size).toBe(0)
   })
 
-  it('单文件：名称/数据/CRC 一致', async () => {
-    const blob = buildStoreZip([entry('a.txt', 'hello zip')])
-    expect(blob.type).toBe('application/zip')
-    const entries = await parseZip(blob)
-    expect(entries).toEqual([{ name: 'a.txt', data: new TextEncoder().encode('hello zip') }])
+  it('单文件：名称/数据一致', async () => {
+    const m = await roundTrip([entry('a.txt', 'hello zip')])
+    expect([...m.keys()]).toEqual(['a.txt'])
+    expect(new TextDecoder().decode(m.get('a.txt')!)).toBe('hello zip')
   })
 
-  it('嵌套目录 + 多文件：相对路径完整保留，本地偏移连续', async () => {
-    const entries = [
+  it('嵌套目录 + 多文件：相对路径完整保留', async () => {
+    const m = await roundTrip([
       entry('photos/2024/img.jpg', 'jpeg-bytes'),
       entry('photos/readme.txt', 'readme'),
       entry('docs/a/b/c.txt', 'deep'),
-    ]
-    const parsed = await parseZip(buildStoreZip(entries))
-    expect(parsed.map((e) => e.name)).toEqual(['photos/2024/img.jpg', 'photos/readme.txt', 'docs/a/b/c.txt'])
-    expect(new TextDecoder().decode(parsed[0].data)).toBe('jpeg-bytes')
-    expect(new TextDecoder().decode(parsed[2].data)).toBe('deep')
+    ])
+    expect([...m.keys()]).toEqual(['photos/2024/img.jpg', 'photos/readme.txt', 'docs/a/b/c.txt'])
+    expect(new TextDecoder().decode(m.get('docs/a/b/c.txt')!)).toBe('deep')
   })
 
   it('中文（UTF-8）文件名可回读', async () => {
-    const parsed = await parseZip(buildStoreZip([entry('照片/旅行/雪景.jpg', 'x')]))
-    expect(parsed[0].name).toBe('照片/旅行/雪景.jpg')
+    const m = await roundTrip([entry('照片/旅行/雪景.jpg', 'x')])
+    expect([...m.keys()]).toEqual(['照片/旅行/雪景.jpg'])
   })
 
-  it('二进制数据（含 0x00 与高位字节）CRC 与数据一致', async () => {
+  it('二进制数据（含 0x00 与高位字节）逐字节一致', async () => {
     const data = new Uint8Array([0, 1, 2, 0x80, 0xff, 0x00, 0x7f])
-    const parsed = await parseZip(buildStoreZip([{ path: 'bin.dat', data }]))
-    expect([...parsed[0].data]).toEqual([...data])
+    const m = await roundTrip([entry('bin.dat', data)])
+    expect([...m.get('bin.dat')!]).toEqual([...data])
+  })
+
+  it('压缩生效：可压缩内容（重复文本）zip 显著小于原文', async () => {
+    const big = '重复内容重复内容重复内容重复内容重复内容重复内容重复内容'.repeat(5000)
+    const blob = await buildZip([entry('docs/notes.txt', big)])
+    expect(blob.size).toBeLessThan(big.length / 3) // deflate 压缩率显著（>3x）
+  })
+
+  it('不可压缩内容（真随机）：体积基本持平（deflate 开销很小）', async () => {
+    const data = new Uint8Array(200_000)
+    for (let i = 0; i < data.length; i += 65536) {
+      crypto.getRandomValues(data.subarray(i, Math.min(i + 65536, data.length)))
+    }
+    const blob = await buildZip([entry('rand.bin', data)])
+    expect(blob.size).toBeLessThan(data.length + 2000) // 含头开销，但不超过 ~2KB 冗余
+    expect(blob.size).toBeGreaterThan(data.length * 0.95)
+  })
+
+  it('level 0（store）≈ 原大小；level 6（默认）压缩更小', async () => {
+    const big = 'compressible '.repeat(20000)
+    const store = await buildZip([entry('a.txt', big)], 0)
+    const deflated = await buildZip([entry('a.txt', big)])
+    expect(deflated.size).toBeLessThan(store.size)
+  })
+
+  it('ZIP_LEVEL 默认 6（均衡档）', () => {
+    expect(ZIP_LEVEL).toBe(6)
   })
 })
 

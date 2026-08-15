@@ -85,10 +85,11 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 - **分区**：iOS 各浏览器/独立 PWA 存储分区隔离 —— 数据写入与清理必须同一浏览器/模式（spike 实测）
 - **导出**：完成后拼接 → `navigator.share({ files })`：
   - 单文件：`image/*|video/*` 且 < 300 MiB → 分享面板可「存储到照片」；大文件 → 「存储到文件」，界面提示可经 Files 分享面板导入照片（原生分享可处理大文件；spike 实测 ~600MiB 视频经 Web Share 崩溃）
-  - **文件夹发送（name 含 `/`）**：接收端按顶层目录分组（`groupTopLevel`），目录组提供两种结构保持导出：
-    - **导出 zip（store，不压缩）**：整棵目录树打包为单个 zip（`zip.ts`，零依赖 store-only，UTF-8 文件名 + CRC-32；单条目 ≤ 4GiB zip32 上限），分享/下载后目标端「文件」App 原生解压即还原目录结构
+  - **文件夹发送（name 含 `/`）**：接收端按顶层目录分组（`groupTopLevel`），目录组提供三种结构保持导出：
+    - **导出 zip（deflate 均衡压缩，level 6）**：整棵目录树打包为单个 zip（`zip.ts`，fflate 纯 JS 零运行时依赖，worker 异步不冻结 UI，UTF-8 文件名；单条目 ≤ 4GiB zip32 上限），分享（目标端「文件」App 选位置后原生解压）或下载（无分享能力自动降级，两端一致）
+    - **导出到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标目录 → 按相对路径逐段建目录写入文件树（`fsaExport.ts`），无需解压即还原目录结构
     - **批量分享**：组内全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；`shareNames` basename + 父目录前缀消歧）
-    - 守卫：组总大小 > 1 GiB（`ZIP_TOTAL_GUARD_BYTES`）提示分批/逐文件导出（Web Share 需整组读入内存，iOS 内存敏感）
+    - 守卫：组总大小 > 1 GiB（`ZIP_TOTAL_GUARD_BYTES`）提示分批/逐文件导出（打包需整组读入内存，iOS 内存敏感）
 - `navigator.storage.estimate()` 在 iOS 恒返回 0，不可用于容量判断（spike 实测）；传输前容量预警：桌面用 estimate（quota-usage）精确判定；iOS 降级 OPFS 写探测（步进到目标/失败点，探测上限 2GiB，超出部分提示「无法精确预检」不阻断——传输中 QuotaExceededError 由 bitfield 续传兜底）
 
 ## 5. 信令

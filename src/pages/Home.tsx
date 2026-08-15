@@ -17,8 +17,9 @@ import { walkDirectory, filesFromWebkitDirectory, basename } from '../transfer/d
 import type { PickedDirFile } from '../transfer/dirPicker'
 import { groupTopLevel, shareNames, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
 import type { FolderGroup } from '../transfer/folderExport'
-import { buildStoreZip, ZIP_MIME } from '../transfer/zip'
+import { buildZip, ZIP_MIME } from '../transfer/zip'
 import type { ZipEntry } from '../transfer/zip'
+import { writeFileTree } from '../transfer/fsaExport'
 import { WakeLockManager } from '../wakelock/wakeLock'
 import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
@@ -76,6 +77,12 @@ interface RecvItem {
 const CAN_PICK_DIR =
   typeof window !== 'undefined' &&
   ('showDirectoryPicker' in window || 'webkitdirectory' in HTMLInputElement.prototype)
+
+/** 分享文件能力（navigator.share + canShare(files)）；桌面 macOS Chrome 等不支持时降级下载 */
+const CAN_SHARE_FILES =
+  typeof navigator !== 'undefined' &&
+  typeof navigator.share === 'function' &&
+  (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [new File(['x'], 'x')] }))
 
 export default function Home() {
   const [orphans, setOrphans] = useState<OrphanReport | null>(null)
@@ -656,24 +663,28 @@ export default function Home() {
   }
 
   /**
-   * 文件夹导出 zip（store，不压缩）：目录树结构 100% 保留（SPEC §4）。
-   * 分享 → 目标端「文件」App 原生解压即还原整棵目录树；下载 → 浏览器下载。
+   * 文件夹导出 zip（deflate 均衡压缩）：目录树结构 100% 保留（SPEC §4）。
+   * 有分享能力 → 分享（目标端「文件」App 选位置后原生解压还原）；
+   * 无分享能力（桌面 macOS Chrome 等）→ 自动降级为下载，两端行为一致。
    */
-  async function exportFolderZip(group: FolderGroup<RecvItem>, mode: 'share' | 'download') {
+  async function exportFolderZip(group: FolderGroup<RecvItem>) {
     if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
       setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB 打包上限，请分批或逐文件导出`)
       return
     }
-    setExportMsg(`正在打包 ${group.dir}/ 为 zip…`)
+    setExportMsg(`正在压缩 ${group.dir}/ 为 zip…`)
     try {
       const entries: ZipEntry[] = []
       for (const it of group.items) {
-        const bytes = await readMergedOf(it)
-        entries.push({ path: it.name, data: bytes })
+        entries.push({ path: it.name, data: await readMergedOf(it) })
       }
-      const blob = buildStoreZip(entries)
+      const blob = await buildZip(entries)
       const zipName = `${group.dir}.zip`
-      if (mode === 'download') {
+      if (CAN_SHARE_FILES) {
+        const file = new File([blob], zipName, { type: ZIP_MIME })
+        await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+        setExportMsg(`已分享 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+      } else {
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
@@ -682,11 +693,36 @@ export default function Home() {
         a.click()
         a.remove()
         URL.revokeObjectURL(url)
-      } else {
-        const file = new File([blob], zipName, { type: ZIP_MIME })
-        await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+        setExportMsg(`已下载 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
       }
-      setExportMsg(`已导出 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+  }
+
+  /**
+   * 文件夹导出到指定文件夹（桌面 FSA）：showDirectoryPicker 选目标 →
+   * 按相对路径逐段建目录写入文件树，无需解压即还原目录结构。
+   */
+  async function exportFolderToDir(group: FolderGroup<RecvItem>) {
+    if (typeof window.showDirectoryPicker !== 'function') {
+      setExportMsg('此浏览器不支持选目标文件夹（需桌面 Chrome/Edge）；可用「导出 zip」后经「文件」App 选位置')
+      return
+    }
+    if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
+      setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB，请分批或逐文件导出`)
+      return
+    }
+    setExportMsg('选择目标文件夹…')
+    try {
+      const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
+      setExportMsg(`正在导出 ${group.items.length} 个文件到「${dirHandle.name}」…`)
+      for (const it of group.items) {
+        await writeFileTree(dirHandle, it.name, await readMergedOf(it))
+      }
+      setExportMsg(`已导出 ${group.items.length} 个文件到「${dirHandle.name}」（目录结构保留，无需解压）`)
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
         setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
@@ -946,9 +982,13 @@ export default function Home() {
                           </span>
                           {g.items.every((it) => it.status === 'done') ? (
                             <div className="row" style={{ flexWrap: 'wrap', rowGap: 4 }}>
-                              <button onClick={() => void exportFolderZip(g, 'share')}>导出 zip</button>
-                              <button onClick={() => void exportFolderZip(g, 'download')}>下载 zip</button>
-                              <button onClick={() => void exportFolderShare(g)}>批量分享</button>
+                              <button onClick={() => void exportFolderZip(g)}>导出 zip</button>
+                              {'showDirectoryPicker' in window && (
+                                <button onClick={() => void exportFolderToDir(g)}>导出到文件夹…</button>
+                              )}
+                              {CAN_SHARE_FILES && (
+                                <button onClick={() => void exportFolderShare(g)}>批量分享</button>
+                              )}
                             </div>
                           ) : (
                             <span className="mono">
