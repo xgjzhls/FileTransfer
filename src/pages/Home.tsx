@@ -15,7 +15,7 @@ import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
 import { walkDirectory, filesFromWebkitDirectory, basename } from '../transfer/dirPicker'
 import type { PickedDirFile } from '../transfer/dirPicker'
-import { groupTopLevel, shareNames, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
+import { groupTopLevel, shareNames, uniqueZipPaths, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
 import type { FolderGroup } from '../transfer/folderExport'
 import { buildZip, ZIP_MIME } from '../transfer/zip'
 import type { ZipEntry } from '../transfer/zip'
@@ -672,14 +672,15 @@ export default function Home() {
       setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB 打包上限，请分批或逐文件导出`)
       return
     }
-    setExportMsg(`正在压缩 ${group.dir}/ 为 zip…`)
+    setExportMsg(`正在压缩 ${group.dir || '全部文件'}/ 为 zip…`)
     try {
+      const paths = uniqueZipPaths(group.items)
       const entries: ZipEntry[] = []
       for (const it of group.items) {
-        entries.push({ path: it.name, data: await readMergedOf(it) })
+        entries.push({ path: paths.get(it)!, data: await readMergedOf(it) })
       }
       const blob = await buildZip(entries)
-      const zipName = `${group.dir}.zip`
+      const zipName = `${group.dir || '全部文件'}.zip`
       if (CAN_SHARE_FILES) {
         const file = new File([blob], zipName, { type: ZIP_MIME })
         await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
@@ -719,8 +720,9 @@ export default function Home() {
     try {
       const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
       setExportMsg(`正在导出 ${group.items.length} 个文件到「${dirHandle.name}」…`)
+      const paths = uniqueZipPaths(group.items)
       for (const it of group.items) {
-        await writeFileTree(dirHandle, it.name, await readMergedOf(it))
+        await writeFileTree(dirHandle, paths.get(it)!, await readMergedOf(it))
       }
       setExportMsg(`已导出 ${group.items.length} 个文件到「${dirHandle.name}」（目录结构保留，无需解压）`)
     } catch (e) {
@@ -741,7 +743,7 @@ export default function Home() {
       const names = shareNames(group.items)
       const files: File[] = []
       for (const it of group.items) {
-        const shareName = names.get(it.name)!
+        const shareName = names.get(it)!
         const bytes = await readMergedOf(it)
         files.push(new File([bytes.buffer as ArrayBuffer], shareName, { type: guessMime(shareName) }))
       }
@@ -972,12 +974,14 @@ export default function Home() {
                   </p>
                 )}
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                  {folderGroups.map((g) =>
-                    g.dir === '' ? null : (
-                      <li key={g.dir} style={{ margin: '8px 0' }}>
+                  {folderGroups.map((g) => {
+                    // 根目录组（散文件多选发送，name 无 /）：单独显示也可批量导出
+                    const label = g.dir ? `📁 ${g.dir}/` : `📁 ${folderGroups.length === 1 ? '全部文件' : '根目录'}`
+                    return (
+                      <li key={g.dir || '__root__'} style={{ margin: '8px 0' }}>
                         <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                           <span>
-                            📁 {g.dir}/{' '}
+                            {label}{' '}
                             <span className="muted">({g.items.length} 个文件 · {formatBytes(g.totalBytes)})</span>
                           </span>
                           {g.items.every((it) => it.status === 'done') ? (
@@ -997,8 +1001,8 @@ export default function Home() {
                           )}
                         </div>
                       </li>
-                    ),
-                  )}
+                    )
+                  })}
                 </ul>
                 <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                   {recvItems.map((it) => (

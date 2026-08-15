@@ -56,26 +56,49 @@ export function groupTopLevel<T extends FolderExportItem>(items: T[]): FolderGro
 /**
  * 批量分享的 File 名：basename（share 不允许路径分隔符），
  * 组内重名（不同子目录同名文件）用父目录名做前缀消歧，仍重名再追加序号。
- * 返回 { name: shareName } 映射。
+ * 以条目对象为键（同名条目可能共存，不能按 name 键）。
  */
-export function shareNames<T extends FolderExportItem>(items: T[]): Map<string, string> {
+export function shareNames<T extends FolderExportItem>(items: T[]): Map<T, string> {
   const used = new Set<string>()
-  const out = new Map<string, string>()
+  const out = new Map<T, string>()
   for (const it of items) {
     const base = basename(it.name)
     if (!used.has(base)) {
       used.add(base)
-      out.set(it.name, base)
+      out.set(it, base)
       continue
     }
-    // 重名：父目录名（it.name 倒数第二段）做前缀，仍重名再追加序号
+    // 重名：优先父目录名前缀消歧（可读）；无父目录（纯同名文件）或前缀仍撞 → 追加序号
     const segs = it.name.split('/')
     const parent = segs.length >= 2 ? segs[segs.length - 2] : ''
-    let candidate = parent ? `${parent}_${base}` : base
+    const pref = parent ? `${parent}_${base}` : null
+    let candidate = pref && !used.has(pref) ? pref : base
+    if (!used.has(candidate)) {
+      used.add(candidate)
+      out.set(it, candidate)
+      continue
+    }
     let k = 1
-    while (used.has(candidate)) candidate = `${parent}_${base} (${++k})`
+    while (used.has(candidate)) candidate = `${pref ?? base} (${++k})`
     used.add(candidate)
-    out.set(it.name, candidate)
+    out.set(it, candidate)
+  }
+  return out
+}
+
+/**
+ * zip / 目录导出的去重路径：同名条目追加序号（多选发送可能同名，如两个 IMG_0001.JPG），
+ * 保持目录结构不变。以条目对象为键（同名条目共存）。
+ */
+export function uniqueZipPaths<T extends FolderExportItem>(items: T[]): Map<T, string> {
+  const used = new Set<string>()
+  const out = new Map<T, string>()
+  for (const it of items) {
+    let p = it.name
+    let k = 1
+    while (used.has(p)) p = `${it.name} (${++k})`
+    used.add(p)
+    out.set(it, p)
   }
   return out
 }
