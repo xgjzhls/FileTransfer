@@ -17,9 +17,9 @@
 
 - [x] zip 使用 deflate level 6（`ZIP_LEVEL`）：可压缩内容 zip 显著小于原文（单测 >3x），不可压缩内容（真随机）体积持平（开销 <2KB）；`unzip -t` / Python zipfile 回读通过（deflate type 8 + 中文 UTF-8 名）
 - [x] zip 打包走 fflate worker 异步 `zip`（1GiB 级不冻结主线程/UI）；单条目 ≤4GiB、路径安全、重名预检不变（`assertZipEntries`）
-- [x] 「导出 zip」按钮智能路由：`CAN_SHARE_FILES`（navigator.share + canShare(files) 探测）为真 → 分享；为假（如桌面 macOS Chrome）→ 自动下载，两端行为一致
+- [x] 「导出 zip」按钮智能路由：**分享仅无 FSA 的移动端**（iOS/Android 实测可用）；桌面 Chrome/Edge 直接下载——navigator.share 在桌面端要求用户激活尚在，拼接+压缩耗时后激活已失效会抛 NotAllowedError（权限不足）；分享抛权限类错误自动降级下载（T19 修正 2）
 - [x] 「导出到文件夹…」按钮仅 `showDirectoryPicker` 可用时显示（桌面 Chrome/Edge）：选目标目录 → 逐文件 `createWritable` 写入、逐段建目录保留结构；导出消息含目标名与文件数
-- [x] 「批量分享」仅 `CAN_SHARE_FILES` 时显示；逐文件导出按钮不变
+- [x] 「批量分享」仅 `CAN_SHARE_FILES && !HAS_FSA_PICKER`（移动端）显示；桌面端由「导出到文件夹…/导出 zip 下载」覆盖，规避桌面分享激活限制；逐文件导出按钮不变
 - [x] **根目录组可见（T19 修正）**：散文件发送（name 无 `/`，如文件夹根目录文件）不再只给逐文件导出——全部文件归入「📁 全部文件/根目录」组，同样提供 导出 zip / 导出到文件夹… / 批量分享（修复：纯根目录文件时此前无批量导出入口）
 - [x] 重名去重：zip/目录导出用 `uniqueZipPaths`（同名条目追加序号，以条目对象为键，同 name 条目可共存），批量分享 `shareNames` 同样对象键化
 - [x] 组总大小 >1GiB 守卫不变（zip/导出到文件夹/批量分享三处统一提示）

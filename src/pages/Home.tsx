@@ -78,6 +78,9 @@ const CAN_PICK_DIR =
   typeof window !== 'undefined' &&
   ('showDirectoryPicker' in window || 'webkitdirectory' in HTMLInputElement.prototype)
 
+/** 桌面 Chrome/Edge：File System Access 目录选择器（选源/目标）；有它=桌面端 */
+const HAS_FSA_PICKER = typeof window !== 'undefined' && 'showDirectoryPicker' in window
+
 /** 分享文件能力（navigator.share + canShare(files)）；桌面 macOS Chrome 等不支持时降级下载 */
 const CAN_SHARE_FILES =
   typeof navigator !== 'undefined' &&
@@ -662,10 +665,23 @@ export default function Home() {
     return adapter.readMerged(sessionId, item.id, item.name) as Promise<Uint8Array<ArrayBuffer>>
   }
 
+  /** 浏览器下载（a.download）—— 桌面端 zip / 分享失败时的落盘路径 */
+  function downloadBlob(blob: Blob, name: string): void {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   /**
    * 文件夹导出 zip（deflate 均衡压缩）：目录树结构 100% 保留（SPEC §4）。
-   * 有分享能力 → 分享（目标端「文件」App 选位置后原生解压还原）；
-   * 无分享能力（桌面 macOS Chrome 等）→ 自动降级为下载，两端行为一致。
+   * 分享仅用于无 FSA 的设备（iOS/Android，实测可用）；桌面 Chrome/Edge（有
+   * FSA）直接下载——navigator.share 在桌面端要求用户激活尚在，拼接+压缩耗时后
+   * 激活已失效，会抛 NotAllowedError（权限不足）。分享抛权限类错误同样降级下载。
    */
   async function exportFolderZip(group: FolderGroup<RecvItem>) {
     if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
@@ -681,21 +697,24 @@ export default function Home() {
       }
       const blob = await buildZip(entries)
       const zipName = `${group.dir || '全部文件'}.zip`
-      if (CAN_SHARE_FILES) {
-        const file = new File([blob], zipName, { type: ZIP_MIME })
-        await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
-        setExportMsg(`已分享 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
-      } else {
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = zipName
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        URL.revokeObjectURL(url)
-        setExportMsg(`已下载 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+      if (CAN_SHARE_FILES && !HAS_FSA_PICKER) {
+        try {
+          const file = new File([blob], zipName, { type: ZIP_MIME })
+          await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+          setExportMsg(`已分享 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+          return
+        } catch (shareErr) {
+          if ((shareErr as Error).name === 'AbortError') return
+          if ((shareErr as Error).name === 'NotAllowedError' || (shareErr as Error).name === 'SecurityError') {
+            downloadBlob(blob, zipName)
+            setExportMsg(`分享不可用，已改为下载 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+            return
+          }
+          throw shareErr
+        }
       }
+      downloadBlob(blob, zipName)
+      setExportMsg(`已下载 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
         setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
@@ -750,9 +769,12 @@ export default function Home() {
       await navigator.share({ files, title: group.dir, text: '存储到文件（多个文件收进一个文件夹，子目录拍平）' })
       setExportMsg(`已批量分享 ${group.items.length} 个文件（分享面板选「存储到文件」）`)
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
-        setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
+      if ((e as Error).name === 'AbortError') return
+      if ((e as Error).name === 'NotAllowedError' || (e as Error).name === 'SecurityError') {
+        setExportMsg('分享不可用（权限受限）：桌面端请用「导出 zip」下载或「导出到文件夹…」')
+        return
       }
+      setExportMsg(`导出失败：${e instanceof Error ? e.message : String(e)}`)
     }
   }
 
@@ -987,10 +1009,10 @@ export default function Home() {
                           {g.items.every((it) => it.status === 'done') ? (
                             <div className="row" style={{ flexWrap: 'wrap', rowGap: 4 }}>
                               <button onClick={() => void exportFolderZip(g)}>导出 zip</button>
-                              {'showDirectoryPicker' in window && (
+                              {HAS_FSA_PICKER && (
                                 <button onClick={() => void exportFolderToDir(g)}>导出到文件夹…</button>
                               )}
-                              {CAN_SHARE_FILES && (
+                              {CAN_SHARE_FILES && !HAS_FSA_PICKER && (
                                 <button onClick={() => void exportFolderShare(g)}>批量分享</button>
                               )}
                             </div>
