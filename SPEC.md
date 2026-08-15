@@ -113,7 +113,7 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } ) )
 ```
 
-要点：等 `icegatheringstatechange == complete` 再取 `pc.localDescription.sdp`（此时全部 candidate 已内嵌），gzip 压缩后单码装得下（QR v40-L ≈ 3KB）。方向：offer 端先显示二维码 → answer 端扫码 → answer 端显示二维码 → offer 端扫码 → 建连。电脑无摄像头 fallback：手动粘贴 answer 文本（低优先级）。
+要点：等 `icegatheringstatechange == complete` 再取 `pc.localDescription.sdp`（此时全部 candidate 已内嵌），gzip 压缩后单码装得下（QR v40-L ≈ 3KB）。方向：offer 端先显示二维码 → answer 端扫码 → answer 端显示二维码 → offer 端扫码 → 建连。电脑无摄像头 fallback：手动粘贴 answer 文本（低优先级）。扫码取景：扫描区为视频中心 95% 正方形（T15 修复——默认 2/3 会把充满取景框的码的定位角裁掉导致永不识别），取景框可见，提示「码完整入框、留边距」。
 
 轻量打磨（ADR-0006）：扫码自动判定码型（offer/answer）并切换本端角色，无需先选；扫码失败自动重试与明确提示；错误文案按场景区分（权限 / 无摄像头 / 占用 / 非安全上下文）；配对成功明确反馈。不做中等/大改项（信任设备记忆、配对向导重设计）。
 

@@ -388,6 +388,9 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
           {phase === 'scan-wait' && (
             <>
               <p className="muted">扫描发送端的配对码（或粘贴其文本）；扫到 offer 码会自动进入接收流程：</p>
+              <p className="muted" style={{ fontSize: 12 }}>
+                提示：把二维码完整放入取景框，码的边缘留出边距，不要贴太近。
+              </p>
               {scanning && (
                 <video
                   ref={videoRef}
