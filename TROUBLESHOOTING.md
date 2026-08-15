@@ -55,6 +55,30 @@
 5. [ ] 路由器设置：AP 隔离 / 客户端隔离 / 访客网络
 6. [ ] 证书：手机已装并完全信任 ca.crt（否则报证书警告，症状不同）
 
+## 信令服务器连不上（开发环境，PIN 后一直重连/离线）——排查记录（2026-08-15）
+
+> **症状**：输入 PIN → 状态停在「连接中…/重连中…」→ 最终「离线」；浏览器 console 有
+> `WebSocket connection to 'wss://<IP>:8787/ws?...' failed: ... net::ERR_CERT_*`。
+
+**根因：wrangler dev / vite dev 不会热加载证书与 .env 改动，IP 变了但进程没重启。**
+本机 IP 从旧值变成新值后：证书重签了（server.crt 含新 IP）、`.env.development` 也改了，
+但两个 dev 进程还是按**启动时**的旧值运行 → 浏览器拿旧证书校验新 IP，
+`ERR_CERT_COMMON_NAME_INVALID`（证书没新 IP 的 SAN）或 `ERR_CERT_AUTHORITY_INVALID`（设备没装/没信 ca.crt）。
+
+排查要点：
+1. **确认前端实际用的信令 URL**（vite 可能缓存旧 env）：
+   `curl -sk https://localhost:5173/src/pages/Home.tsx | grep -o 'VITE_SIGNALING_WSS[^,]*'`
+   应与 `.env.development` 一致；不一致 → 重启 vite（`.env` 改动只在启动时读一次）。
+2. **确认 wrangler dev 正在服务哪张证书**：
+   `echo | openssl s_client -connect localhost:8787 2>/dev/null | openssl x509 -noout -text | grep -A1 "Subject Alternative"`
+   必须含当前 en0 IP；不含 → 重启 wrangler dev（证书在启动时读一次，**不热加载**）。
+3. 用 CA 验证链路（模拟信任 ca.crt 的设备）：`curl --cacert .local-certs/ca.crt https://<IP>:8787/` 应 200。
+4. 冒烟：`cd server && NODE_EXTRA_CA_CERTS=../.local-certs/ca.crt node smoke.mjs https://<IP>:8787` → 8/8。
+5. 设备侧：手机装并完全信任 ca.crt（一次性）；桌面 Chrome 访问 `https://<IP>:8787` 点「继续前往」豁免一次。
+
+**正确流程（IP 变化后）**：改 `.env.development` → 重启 vite → 重启 wrangler dev → 设备测。
+证书重签步骤见 `.local-certs/README.md`（CA 不换则手机无需重装）。
+
 ## 命令速查
 
 ```bash
