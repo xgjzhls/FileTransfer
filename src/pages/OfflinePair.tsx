@@ -27,10 +27,13 @@
  * T17 断线快捷重配（SPEC §5.3 / ADR-0007）：断线警告旁「重新配对」一步回本端 offer
  * 页（保持角色，不重走 pick）+ 自动重新生成配对码；桌面 offer 页主次重排——粘贴为
  * 唯一主操作、扫码降为 details 入口、重新生成收进角落（手机端 offer 页保持现状）。
+ *
+ * T21 全屏放大（SPEC §5.3）：offer/answer 二维码可点击放大为全屏超大码
+ * （min(88vw,82vh)，渲染上限 1024 保证清晰），点码外空白处 / Esc 关闭。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { RefObject } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { decodeQrText, encodeQrText } from '../qr/qrCodec'
 import { renderQrToCanvas } from '../qr/qrRender'
 import { startQrScanner } from '../qr/qrScan'
@@ -86,9 +89,13 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [copyMsg, setCopyMsg] = useState('')
+  /** T21：全屏放大二维码开关（点码触发；点空白 / Esc / 相位切换关闭） */
+  const [qrFullscreen, setQrFullscreen] = useState(false)
   const [scanning, setScanning] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  /** T21：全屏放大专用 canvas（独立 ref，随遮罩挂载/卸载；避免与主码共 ref） */
+  const fullscreenCanvasRef = useRef<HTMLCanvasElement>(null)
   const scannerRef = useRef<QrScannerHandle | null>(null)
   /** 解码处理中防重入（扫码帧高频触发） */
   const processingRef = useRef(false)
@@ -165,6 +172,16 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
     )
   }, [offerText, answerText, phase])
 
+  // T21 全屏二维码渲染（遮罩打开时渲染一次；maxSize 1024 放大后码块不糊）
+  useEffect(() => {
+    const canvas = fullscreenCanvasRef.current
+    const text = phase === 'offer-show' ? offerText : phase === 'answer-show' ? answerText : ''
+    if (!qrFullscreen || !canvas || !text) return
+    void renderQrToCanvas(canvas, text, 1024).catch((e) =>
+      setErr(`二维码渲染失败：${e instanceof Error ? e.message : String(e)}`),
+    )
+  }, [qrFullscreen, offerText, answerText, phase])
+
   // 配对成功（连接已建立，且本次连接由 QR 流程推进）→ 明确反馈 + 短暂提示后自动收起。
   // pairedRef 门控：面板开着但连接来自在线 WS（点选设备）时不误报、不误收起。
   useEffect(() => {
@@ -184,6 +201,31 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
   useEffect(() => {
     if (!open) setScanning(false)
   }, [open])
+
+  // T21：相位切换 / 面板收起时关闭全屏（全屏内容不得与当前相位脱节）
+  useEffect(() => {
+    setQrFullscreen(false)
+  }, [phase, open])
+
+  // T21：全屏打开时锁定 body 滚动（背后页面不跟随滚动）
+  useEffect(() => {
+    if (!qrFullscreen) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = prev
+    }
+  }, [qrFullscreen])
+
+  // T21：Esc 关闭全屏
+  useEffect(() => {
+    if (!qrFullscreen) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setQrFullscreen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [qrFullscreen])
 
   function reset(): void {
     setPhase('pick')
@@ -332,7 +374,8 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
   const offlineDisconnected = effectiveConn === 'failed' || effectiveConn === 'disconnected'
 
   return (
-    <section className="card">
+    <>
+      <section className="card">
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <h2 style={{ margin: 0 }}>离线扫码配对</h2>
         {open && (
@@ -425,10 +468,12 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
                 </div>
               )}
               <div style={{ textAlign: 'center' }}>
-                <canvas
-                  ref={canvasRef}
-                  style={{ maxWidth: 260, width: '100%', background: '#fff', borderRadius: 8, padding: 4 }}
-                />
+                <QrZoomButton onClick={() => setQrFullscreen(true)}>
+                  <canvas
+                    ref={canvasRef}
+                    style={{ maxWidth: 260, width: '100%', background: '#fff', borderRadius: 8, padding: 4 }}
+                  />
+                </QrZoomButton>
               </div>
               {kind === 'desktop' ? (
                 /* T17 桌面端主次重排：粘贴为唯一主操作（视觉突出），扫码折叠为次要入口 */
@@ -563,17 +608,19 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
             <>
               <p className="muted">接收端回码（请发送端扫描，或把文本发给对方粘贴）：</p>
               <div style={{ textAlign: 'center' }}>
-                <canvas
-                  ref={canvasRef}
-                  style={{
-                    /* T16：回码放大至可用屏宽（min(80vw,360px)），offer 端回扫/回拍更容易扫中 */
-                    maxWidth: answerQrMaxWidth(),
-                    width: '100%',
-                    background: '#fff',
-                    borderRadius: 8,
-                    padding: 4,
-                  }}
-                />
+                <QrZoomButton onClick={() => setQrFullscreen(true)}>
+                  <canvas
+                    ref={canvasRef}
+                    style={{
+                      /* T16：回码放大至可用屏宽（min(80vw,360px)），offer 端回扫/回拍更容易扫中 */
+                      maxWidth: answerQrMaxWidth(),
+                      width: '100%',
+                      background: '#fff',
+                      borderRadius: 8,
+                      padding: 4,
+                    }}
+                  />
+                </QrZoomButton>
               </div>
               <div className="row" style={{ marginTop: 8 }}>
                 <button
@@ -607,7 +654,45 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
           {phase === 'done' && <p className="muted">等待数据通道建立…（连接后自动进入传输界面）</p>}
         </div>
       )}
-    </section>
+      </section>
+
+      {/* T21 全屏放大二维码：点码外空白处 / Esc 关闭；点码本身不关闭 */}
+      {qrFullscreen && (
+        <div
+          onClick={() => setQrFullscreen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="放大二维码，点击空白处或按 Esc 关闭"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1000,
+            background: 'rgba(0, 0, 0, 0.85)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'zoom-out',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: '#fff', borderRadius: 12, padding: 12, cursor: 'default' }}
+          >
+            <canvas
+              ref={fullscreenCanvasRef}
+              style={{
+                display: 'block',
+                width: 'min(88vw, 82vh)',
+                height: 'min(88vw, 82vh)',
+              }}
+            />
+          </div>
+          <span className="muted" style={{ position: 'absolute', bottom: 28, fontSize: 12 }}>
+            点击空白处关闭（或按 Esc）
+          </span>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -662,5 +747,31 @@ function ScannerVideo({ videoRef }: { videoRef: RefObject<HTMLVideoElement | nul
       muted
       style={{ width: '100%', maxWidth: 320, borderRadius: 8, background: '#000', marginTop: 6 }}
     />
+  )
+}
+
+/**
+ * T21 二维码放大按钮——包裹二维码 canvas，点击弹全屏大码。
+ * 真实 button + aria-label：可键盘/读屏到达（裸 canvas 不可聚焦）。
+ */
+function QrZoomButton({ onClick, children }: { onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="点击放大查看二维码"
+      title="点击放大查看二维码"
+      style={{
+        display: 'block',
+        margin: '0 auto',
+        padding: 0,
+        border: 'none',
+        background: 'transparent',
+        cursor: 'zoom-in',
+        lineHeight: 0,
+      }}
+    >
+      {children}
+    </button>
   )
 }

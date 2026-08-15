@@ -337,6 +337,24 @@ try {
       : '无 canvas',
   )
 
+  // T21 点击二维码放大全屏：点码 → 遮罩 + 超大码出现；点空白处关闭（answer 端验证，offer 端同组件同路径）
+  await pageB.getByRole('button', { name: '点击放大查看二维码' }).click()
+  const qrFull = await pageB.evaluate(() => {
+    const fc = document.querySelector('[role="dialog"] canvas')
+    const dialog = document.querySelector('[role="dialog"]')
+    if (!dialog || !fc) return null
+    const r = fc.getBoundingClientRect()
+    return { dialogVisible: true, w: r.width, h: r.height }
+  })
+  step(
+    'T21 点击二维码放大全屏',
+    qrFull !== null && qrFull.dialogVisible && qrFull.w >= 300 && qrFull.h >= 300,
+    qrFull ? `全屏码 ${qrFull.w.toFixed(0)}×${qrFull.h.toFixed(0)}px` : '无全屏遮罩',
+  )
+  await pageB.mouse.click(10, 10) // 左上角空白处：点周围空白关闭
+  const closedAfterBlank = (await pageB.getByRole('dialog').count()) === 0
+  step('T21 点空白处关闭全屏', closedAfterBlank, closedAfterBlank ? '遮罩已移除' : '遮罩仍存在')
+
   // A 粘贴 answer（T14 电脑端回码粘贴框常驻，无需展开 details；两端完成 SDP 交换）
   await pageA.getByPlaceholder('粘贴或输入配对码文本').fill(answerText)
   await pageA.getByRole('button', { name: '应用' }).click()
