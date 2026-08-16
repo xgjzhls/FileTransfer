@@ -1,0 +1,35 @@
+/**
+ * web 降级实现：浏览器无 mDNS/DNS-SD 浏览、无 UDP 组播/广播（ADR-0009 决策 1 核实）。
+ * 非壳（浏览器）环境调用原生发现即明确报错；addListener/removeAllListeners 继承
+ * WebPlugin 的 no-op 事件机制（web 无事件可收，但不炸）。
+ * app 端（Capacitor）走原生实现；T06 仅在 app 内接入本插件。
+ */
+import { WebPlugin } from '@capacitor/core'
+import type { DeviceInfo, LanDiscoveryPlugin, LanDiscoveryStatus, StartResult } from './index'
+
+const unavailable = (method: string) =>
+  Promise.reject(new Error(`LanDiscovery.${method} 仅 app 内可用（ADR-0009）`))
+
+export class WebLanDiscovery extends WebPlugin implements LanDiscoveryPlugin {
+  startAdvertising(_options: DeviceInfo): Promise<StartResult> {
+    return unavailable('startAdvertising')
+  }
+
+  stopAdvertising(): Promise<{ ok: boolean }> {
+    return unavailable('stopAdvertising')
+  }
+
+  startBrowsing(): Promise<StartResult> {
+    return unavailable('startBrowsing')
+  }
+
+  stopBrowsing(): Promise<{ ok: boolean }> {
+    return unavailable('stopBrowsing')
+  }
+
+  getStatus(): Promise<LanDiscoveryStatus> {
+    return unavailable('getStatus')
+  }
+}
+
+export const webLanDiscovery = new WebLanDiscovery()

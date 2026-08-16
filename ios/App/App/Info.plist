@@ -4,6 +4,8 @@
 <dict>
   <key>CAPACITOR_DEBUG</key>
 	<string>$(CAPACITOR_DEBUG)</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>局域网发现需要本地网络权限：在同一 Wi-Fi 下发现附近设备并传输文件。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>扫码配对需要摄像头权限：离线配对时扫描对方屏幕上的配对码（二维码）。</string>
 	<key>CFBundleDevelopmentRegion</key>

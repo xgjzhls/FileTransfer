@@ -18,6 +18,7 @@
     "@capacitor/share": "^8.0.1",
     "fflate": "^0.8.3",
     "folder-export": "file:plugins/folder-export",
+    "lan-discovery": "file:plugins/lan-discovery",
     "qr-scanner": "^1.4.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",

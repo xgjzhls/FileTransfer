@@ -1,10 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Capacitor } from '@capacitor/core'
+import type { PluginListenerHandle } from '@capacitor/core'
 import { FolderExport } from 'folder-export'
+import { LanDiscovery, DeviceRegistry } from 'lan-discovery'
+import type { DeviceInfo, TrackedDevice } from 'lan-discovery'
 import { runOpfsQuotaTest, clearOpfsTestData, type OpfsQuotaResult } from '../spike/opfs'
 import { runStreamDownloadTest, type StreamDownloadResult } from '../spike/streamDownload'
 import { createNativeExportBridge } from '../native/bridge'
 import { copyFileToNative } from '../transfer/nativeExport'
+import { getOrCreateDeviceId } from '../rooms/session'
+import { detectKind } from '../device'
 
 const IS_NATIVE = Capacitor.isNativePlatform()
 
@@ -202,6 +207,97 @@ export default function SpikePage() {
     }
   }
 
+  // ---- Test 5: 局域网发现插件（ADR-0009 / T02，仅 app 内）----
+  const [lanLog, setLanLog] = useState<string[]>([])
+  const [lanDevices, setLanDevices] = useState<TrackedDevice[]>([])
+  const [lanBusy, setLanBusy] = useState('')
+  const lanRegistryRef = useRef<DeviceRegistry | null>(null)
+  if (lanRegistryRef.current === null) lanRegistryRef.current = new DeviceRegistry()
+
+  const detectedKind = detectKind()
+  const advertOptions: DeviceInfo = {
+    name: localStorage.getItem('lt.deviceName')?.trim() || '未命名设备',
+    id: getOrCreateDeviceId(),
+    // 插件 schema 只收 phone/tablet/desktop（SPEC §5.5）；detectKind 的 'other' 归为 phone
+    kind: detectedKind === 'other' ? 'phone' : detectedKind,
+    port: 8443, // T04 信令端口占位（仅写入 TXT，不参与发现）
+    ver: '1',
+  }
+
+  useEffect(() => {
+    if (!IS_NATIVE) return
+    const registry = lanRegistryRef.current!
+    const unsubs: Promise<PluginListenerHandle>[] = [
+      LanDiscovery.addListener('deviceFound', (d) => {
+        registry.add(d, Date.now())
+        setLanDevices(registry.list())
+      }),
+      LanDiscovery.addListener('deviceLost', ({ id }) => {
+        registry.remove(id)
+        setLanDevices(registry.list())
+      }),
+      LanDiscovery.addListener('permissionDenied', () => {
+        setLanLog((l) => [...l, '⚠️ 本地网络权限被拒：设置 → 隐私与安全性 → 本地网络 → 开启 LocalTransfer'])
+      }),
+    ]
+    return () => { void Promise.all(unsubs).then((hs) => hs.forEach((h) => h.remove())) }
+  }, [])
+
+  // last-seen TTL 兑底（mDNS TTL 默认 120s）：即使没收到 deviceLost 也清掉超时设备
+  useEffect(() => {
+    if (!IS_NATIVE) return
+    const t = setInterval(() => {
+      if (lanRegistryRef.current!.pruneStale(120_000, Date.now()).length > 0) {
+        setLanDevices(lanRegistryRef.current!.list())
+      }
+    }, 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  const lanPush = (line: string) => setLanLog((l) => [...l.slice(-20), line])
+
+  async function handleAdvert(on: boolean) {
+    setLanBusy(on ? '广告' : '停广告')
+    try {
+      const r = on
+        ? await LanDiscovery.startAdvertising(advertOptions)
+        : await LanDiscovery.stopAdvertising()
+      lanPush(on ? `startAdvertising → ${JSON.stringify(r)}` : `stopAdvertising → ${JSON.stringify(r)}`)
+    } catch (e) {
+      lanPush(`广告失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
+  async function handleBrowse(on: boolean) {
+    setLanBusy(on ? '浏览' : '停浏览')
+    try {
+      if (on) {
+        const r = await LanDiscovery.startBrowsing()
+        lanPush(`startBrowsing → ${JSON.stringify(r)}`)
+        if (r.permissionDenied) {
+          lanPush('⚠️ 权限被拒（见上引导）')
+        }
+      } else {
+        const r = await LanDiscovery.stopBrowsing()
+        lanPush(`stopBrowsing → ${JSON.stringify(r)}`)
+      }
+    } catch (e) {
+      lanPush(`浏览失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
+  async function handleLanStatus() {
+    try {
+      lanPush(`getStatus → ${JSON.stringify(await LanDiscovery.getStatus())}`)
+    } catch (e) {
+      lanPush(`getStatus 失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
   return (
     <>
       <header>
@@ -310,6 +406,33 @@ export default function SpikePage() {
         </button>
         {!IS_NATIVE && <p className="bad">仅 app 内可用（网页版请用桌面 FSA / zip / 分享路径）</p>}
         {nativeProbe && <pre className="mono">{nativeProbe}</pre>}
+      </Card>
+
+      <Card title="测试 5：局域网发现插件（ADR-0009 / T02，仅 app 内）">
+        <p>T02 验收：两台 iOS app 实例同 Wi-Fi 下互发现（发现 → 消失 → 重发现）。广告 TXT = name/id/kind/port/ver（RFC 6763）。首次使用会弹本地网络授权。</p>
+        <p className="mono">isNativePlatform: {String(IS_NATIVE)}</p>
+        <p className="mono">本机广告参数: {JSON.stringify(advertOptions)}</p>
+        <div className="row">
+          <button onClick={() => handleAdvert(true)} disabled={!!lanBusy || !IS_NATIVE}>{lanBusy === '广告' ? '广告中…' : '开始广告'}</button>
+          <button onClick={() => handleAdvert(false)} disabled={!!lanBusy || !IS_NATIVE}>停止广告</button>
+          <button onClick={() => handleBrowse(true)} disabled={!!lanBusy || !IS_NATIVE}>{lanBusy === '浏览' ? '浏览中…' : '开始浏览'}</button>
+          <button onClick={() => handleBrowse(false)} disabled={!!lanBusy || !IS_NATIVE}>停止浏览</button>
+          <button onClick={handleLanStatus} disabled={!!lanBusy || !IS_NATIVE}>状态</button>
+        </div>
+        {!IS_NATIVE && <p className="bad">仅 app 内可用（浏览器无 mDNS/DNS-SD 能力，ADR-0009）</p>}
+        {lanDevices.length === 0 && !lanLog.length ? null : (
+          <>
+            <p className="mono">发现的设备（{lanDevices.length}）：</p>
+            <ul>
+              {lanDevices.map((d) => (
+                <li key={d.id} className="mono">
+                  {d.name}（{d.kind}，port {d.port}，ver {d.ver}）service={d.serviceName}@{d.domain} 首次 {new Date(d.firstSeen).toLocaleTimeString()} 最后 {new Date(d.lastSeen).toLocaleTimeString()}
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {lanLog.map((line, i) => <pre key={i} className="mono">{line}</pre>)}
       </Card>
     </>
   )

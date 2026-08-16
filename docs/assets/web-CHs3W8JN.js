@@ -1,0 +1,1 @@
+import{t as e}from"./index-C6OXhv1z.js";var t=e=>Promise.reject(Error(`LanDiscovery.${e} 仅 app 内可用（ADR-0009）`)),n=new class extends e{startAdvertising(e){return t(`startAdvertising`)}stopAdvertising(){return t(`stopAdvertising`)}startBrowsing(){return t(`startBrowsing`)}stopBrowsing(){return t(`stopBrowsing`)}getStatus(){return t(`getStatus`)}};export{n as webLanDiscovery};
