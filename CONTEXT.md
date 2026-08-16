@@ -21,6 +21,7 @@
 | 应用形态 | 单套 PWA（React + TS + Vite + vite-plugin-pwa），所有端同一套代码 | 零安装、零分发；一次引导永久离线 |
 | P2P | WebRTC DataChannel（simple-peer 封装或原生） | 浏览器内唯一真 P2P 通道 |
 | 信令 | 单协议双通道：在线走轻量 WebSocket 信令服务（房间发现 + SDP 中转），离线降级二维码交换压缩 SDP | 打开网页即发现设备；离线兜底（ADR-0002 / 0004） |
+| 发现（app 端） | 原生 mDNS/DNS-SD（`_localtranfer._tcp` + TXT 设备信息）+ 原生信令通道；电脑腿 = app 本地 WSS 信令服务器（只转信令，数据直连） | app↔app 离线免扫码；Chrome 网页无发现能力、只能主动连接（ADR-0009） |
 | 引导 bootstrap | HTTPS 静态托管（GitHub Pages / Cloudflare Pages），每设备联网访问一次 + SW 全量缓存 | 摄像头权限要求安全上下文（HTTPS）；SW 缓存后永久离线且保持安全上下文 |
 | 接收端存储 | **OPFS + createSyncAccessHandle（Worker 内随机写）**（spike 验证：iOS 唯一可用写入 API；配额宽松 40GB+） | 见「关键风险」 |
 | 发送端读取 | `<input type=file multiple>` + `file.slice()` 流式读 | 不把整文件载入内存 |
@@ -45,6 +46,7 @@
 - [ADR-0006](decisions/adr/0006-symmetric-pin-discovery.md)：发现与配对 —— 对称 PIN 房间 + 离线扫码兜底
 - [ADR-0007](decisions/adr/0007-offline-pairing-two-hop.md)：离线配对保持「两跳」——拒绝一扫码旁路（**完全离线是用户主场景**）
 - [ADR-0008](decisions/adr/0008-ios-app-folder-export.md)：iOS 打包 app + 原生文件夹选择，分块流式导出（**修订约束「不做原生应用」**）
+- [ADR-0009](decisions/adr/0009-lan-discovery-local-server.md)：局域网发现 + 本地信令服务器（**修订 ADR-0006 可见性门控**；app↔app 原生 mDNS + 电脑腿本地 WSS，只转信令数据直连）
 
 ## 规格说明
 - **[SPEC.md](SPEC.md)** 为传输协议、存储层、信令、UI、PWA 的正式规格（v1 定稿）。协议细节（消息 schema、状态机、续传握手、参数表）以 SPEC 为准，本文件不再重复维护草案。
@@ -61,6 +63,7 @@
 - 多选批量导出（T20）：接收列表复选框多选（仅已完成文件，可跨顶层目录组勾选），三种批量操作——「导出选中到文件夹…」（桌面 FSA，保持相对路径：photos/a.jpg → 目标目录下 photos/a.jpg，根目录散文件放目标根）/「导出选中 zip」（跨组打包，deflate level 6，手机分享/桌面下载路由同分组 zip）/「批量分享选中」（手机，shareNames 消歧）；导出不设大小上限（T22）；新会话（meta）自动清空勾选；现有逐文件与分组导出全部保留
 - 点击放大全屏（T21）：离线配对 offer/answer 二维码均可点击放大为全屏超大码（min(88vw,82vh)，渲染上限 1024），点码外空白处 / Esc 关闭（SPEC §5.3）
 - iOS app 壳 + 原生文件夹导出（ADR-0008，2026-08-16 已接受，**T01-T05 已完成 2026-08-16**）：「先选文件夹 → 分块流式拷贝」在纯网页版物理不可行（iOS Safari 无 FSA picker，WebKit 反对）→ 方案 = Capacitor 打包 + `UIDocumentPicker(.folder)` 选文件夹（一次，会话内）→ security-scoped URL → OPFS 磁盘背书 File 的 `stream()` 分块（4 MiB）经桥逐块写，峰值内存 = 块大小；分享面板降级次级按钮（`@capacitor/share`）；v1 每次重选文件夹（不持久化）；iOS 先行，Android 后续单独评估；桌面 FSA 直写不动（重名冲突复用 uniqueZipPaths 追加序号；取消 = 停止当前文件、已写保留）
+- **局域网发现 + 本地信令服务器（ADR-0009，2026-08-16 已接受）**：app 原生层 mDNS/DNS-SD 发现（`_localtranfer._tcp` + TXT=name/id/kind/port/ver；iOS Network.framework / Android NsdManager），app↔app 离线免扫码直连（原生信令通道 TCP 交换 SDP，信令单协议扩展为 WS/QR/原生/本地 WSS 四载体）；**同 LAN 直接可见可连（修订 ADR-0006 PIN 门控；在线房间设备门控不变）**，可见性开关默认开、设置可关（`lt.lanVisible`）；数据面先 spike（WKWebView DataChannel，WebKit bug 174500 风险）→ 分支 A 全复用现有栈 / 分支 B 原生 TCP 数据面且电脑腿顺延；电脑腿 = app 本地 WSS 信令服务器（只转信令、数据仍 WebRTC 直连）+ `.local-certs` CA 签发证书 + 桌面 Chrome 一次性信任 CA + 地址输一次记住（`lt.localServer`）；UI 设备列表分「在线房间」「局域网发现」两区块；在线沿用自动回房，局域网发现仅信令不可达时启用；iOS + Android 同步（T03 真机验证跨平台互操作）
 
 ## 开放问题（待拍板 / 待验证）
 1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。
@@ -96,3 +99,7 @@
 - **Capacitor**：把现有 Web 代码打包成原生 app 的容器（iOS = WKWebView + 原生桥插件）；本仓库用于 iOS 导出壳（ADR-0008，修订「不做原生应用」约束）
 - **security-scoped URL**：iOS 文档选择器授予的、可跨进程访问的沙盒外资源引用；访问前需 `startAccessingSecurityScopedResource()` 声明、结束 `stopAccessing()`——app 获得用户所选文件夹读写权的机制
 - **分块流式导出**：OPFS 磁盘背书 File 的 `stream()` 按固定块（默认 4 MiB）经 JS↔原生桥逐块写入目标文件，峰值内存 = 块大小，不整载文件（ADR-0008）
+- **局域网发现**：app 原生层经 mDNS/DNS-SD（`_localtranfer._tcp` + TXT 设备信息）发现同网段开着的 LocalTransfer 设备；浏览器无此能力，Chrome 网页只能主动连接（ADR-0009）
+- **原生信令通道**：app↔app 发现后经 TCP 直连交换 SDP/ICE 的通道——信令「单协议多载体」的第三种载体（WS / QR / 原生通道 / 本地 WSS，ADR-0009）
+- **本地信令服务器**：app 原生层监听 WSS 的信令宿主，供桌面 Chrome 主动连入；只中转 SDP/ICE，文件数据仍 WebRTC 直连（ADR-0009）
+- **可见性开关**：设置页开关（默认开，`lt.lanVisible`）；关 = 本机不出现在他人发现列表、也不主动发现（ADR-0009）

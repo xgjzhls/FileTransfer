@@ -110,3 +110,57 @@ describe('LanDiscovery facade 包装', () => {
     await expect(LanDiscovery.stopBrowsing()).rejects.toThrow(/仅 app 内可用/)
   })
 })
+
+describe('原生信令通道 facade（T04）', () => {
+  const serverDevice = { ...valid, port: 8443 }
+  const peer = {
+    ...valid,
+    id: 'peer-1',
+    serviceName: 'peer-1',
+    domain: 'local.',
+  }
+
+  it('startSignalingServer：非法 device 先于原生被拦（LanOptionsError）；合法委托（web 报仅 app 内可用）', async () => {
+    await expect(LanDiscovery.startSignalingServer({ device: { ...serverDevice, port: 0 } })).rejects.toThrow(
+      LanOptionsError,
+    )
+    await expect(LanDiscovery.startSignalingServer({ device: { name: '' } as never })).rejects.toThrow(LanOptionsError)
+    await expect(LanDiscovery.startSignalingServer({ device: serverDevice })).rejects.toThrow(/仅 app 内可用/)
+  })
+
+  it('connect：peer/myId 非法先拦（LanOptionsError）；合法委托', async () => {
+    await expect(LanDiscovery.connect({ peer, myId: '' })).rejects.toThrow(LanOptionsError)
+    await expect(LanDiscovery.connect({ peer: { ...peer, port: 0 }, myId: 'me' })).rejects.toThrow(LanOptionsError)
+    await expect(LanDiscovery.connect({ peer, myId: 'me' })).rejects.toThrow(/仅 app 内可用/)
+  })
+
+  it('sendMessage：坏 kind / 空 sdp 先拦；合法委托', async () => {
+    await expect(LanDiscovery.sendMessage({ peerId: 'p', kind: 'candidate' as never, sdp: 'x' })).rejects.toThrow(
+      LanOptionsError,
+    )
+    await expect(LanDiscovery.sendMessage({ peerId: 'p', kind: 'offer', sdp: '' })).rejects.toThrow(LanOptionsError)
+    await expect(LanDiscovery.sendMessage({ peerId: 'p', kind: 'answer', sdp: 'gz' })).rejects.toThrow(/仅 app 内可用/)
+  })
+
+  it('stopSignalingServer / disconnect 直接委托', async () => {
+    await expect(LanDiscovery.stopSignalingServer()).rejects.toThrow(/仅 app 内可用/)
+    await expect(LanDiscovery.disconnect({ peerId: 'p' })).rejects.toThrow(/仅 app 内可用/)
+  })
+
+  it('web 降级：全部信令通道方法报仅 app 内可用', async () => {
+    const methods = ['startSignalingServer', 'stopSignalingServer', 'connect', 'disconnect', 'sendMessage'] as const
+    for (const m of methods) {
+      await expect((webLanDiscovery as any)[m]({ device: serverDevice })).rejects.toThrow(/仅 app 内可用/)
+    }
+  })
+
+  it('LAN_CHANNEL_EVENTS 事件名常量齐备（T05 订阅用）', async () => {
+    const { LAN_CHANNEL_EVENTS } = await import('./index')
+    expect(LAN_CHANNEL_EVENTS).toEqual({
+      peerConnected: 'peerConnected',
+      peerDisconnected: 'peerDisconnected',
+      messageReceived: 'messageReceived',
+      signalingError: 'signalingError',
+    })
+  })
+})

@@ -20,15 +20,29 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * ADR-0009 局域网发现插件 Android 实现（T03）：NsdManager 广告/浏览。
@@ -139,6 +153,16 @@ public class LanDiscoveryPlugin extends Plugin {
     /** serviceName → 已发出的 device（found/lost 配对 + 重复 announce 去重；name 可能因重名改名，id 才是稳定键） */
     private final Map<String, JSObject> emittedByName = new HashMap<>();
 
+    // ---- 原生信令通道（T04）：TCP 监听/连接 + 竞态消解（全部状态 main/sync 保护） ----
+    private ServerSocket signalingServer;
+    private int signalingServerPort;
+    private boolean signalingEnabled;
+    private String selfDeviceId;
+    /** peerId → 活跃通道（每对端恰好一条；竞态收敛后） */
+    private final Map<String, ChannelContext> channels = new HashMap<>();
+    /** peerId → 连接建立中的出向连接 */
+    private final Map<String, ChannelContext> outboundPending = new HashMap<>();
+
     // ------------------------------------------------------------------
     // 插件入口
     // ------------------------------------------------------------------
@@ -187,8 +211,575 @@ public class LanDiscoveryPlugin extends Plugin {
             o.put("advertising", advertising);
             o.put("browsing", browsing);
             o.put("permissionDenied", permissionDenied);
+            o.put("signaling", signalingServer != null); // T04：信令服务器在监听
             call.resolve(o);
         });
+    }
+
+    // ------------------------------------------------------------------
+    // 原生信令通道（T04，ADR-0009 决策 1）—— 信令「单协议多载体」的第三种载体
+    // ------------------------------------------------------------------
+    //
+    // Wire 协议（与 channel.ts / iOS 逐条对齐，T04 设计定稿）：
+    // - 帧 = 4B 大端长度前缀 + UTF-8 JSON（DataOutputStream/InputStream 原生大端）；上限 64 KiB
+    // - hello：发起方连上即发 {v:1,type:hello,id,session}，接收方不回
+    // - signal：{v:1,type:signal,kind:offer|answer,sdp}（sdp = gzip+base64url，透明）
+    // - TCP 断开 = 断线
+    //
+    // 竞态（两台同时发起）：低 deviceId 胜 —— 幸存连接 = 低 id 方发起的连接。
+    // 激活点有两处（出向连接成功发完 hello / 入向收到 hello），两侧独立套同一规则收敛。
+    //
+    // 线程：插件方法 main 线程；accept/read/connect 在独立 daemon 线程；状态经 this 同步。
+    // 事件：peerConnected {id,session,role} / peerDisconnected {id} /
+    //       messageReceived {from,session,kind,sdp} / signalingError {peerId?,code,message}
+
+    /** 单帧上限（与 channel.ts MAX_FRAME_BYTES / iOS maxFrameBytes 一致） */
+    private static final int MAX_FRAME_BYTES = 64 * 1024;
+
+    /** connect 超时（Socket 内建；iOS 侧同 10s 兜底） */
+    private static final int CONNECT_TIMEOUT_MS = 10_000;
+
+    /** 一条 TCP 连接的读写上下文（含竞态消解后的通道归属）；peerId/session/role 入向待 hello 填充 */
+    private static class ChannelContext {
+        final Socket socket;
+        final boolean isOutbound;
+        String peerId;
+        String session;
+        String role;
+        volatile boolean terminated;
+
+        ChannelContext(Socket socket, boolean isOutbound, String peerId) {
+            this.socket = socket;
+            this.isOutbound = isOutbound;
+            this.peerId = peerId;
+        }
+    }
+
+    @PluginMethod
+    public void startSignalingServer(PluginCall call) {
+        requireNearbyPermission(call, () -> startSignalingServerInternal(call));
+    }
+
+    /** 启动信令服务器：绑定 device.port + NsdManager 注册（SRV 端口 = TXT port = 监听端口）。
+     *  与旧 startAdvertising（纯广告）双模式互斥：本方法一体（广告+监听），旧广告让位。 */
+    private void startSignalingServerInternal(PluginCall call) {
+        main.post(() -> {
+            if (signalingServer != null) {
+                resolveServerOk(call); // 幂等
+                return;
+            }
+            JSObject device = call.getObject("device");
+            if (device == null) {
+                call.reject("startSignalingServer 缺 device 参数");
+                return;
+            }
+            String name = device.getString("name");
+            String id = device.getString("id");
+            String kind = device.getString("kind");
+            String ver = device.getString("ver");
+            Integer port = device.getInteger("port");
+            if (name == null || id == null || port == null || !KINDS.contains(kind)
+                    || port < 1 || port > 65535) {
+                call.reject("startSignalingServer 参数非法（device.name/id/kind/port/ver）");
+                return;
+            }
+            try {
+                signalingServer = new ServerSocket(port);
+            } catch (IOException e) {
+                // 端口被占 / 绑定失败 → 明确回调（JS 依次试后续端口）
+                call.resolve(startFail("PORT_IN_USE"));
+                return;
+            }
+            signalingServerPort = port;
+            signalingEnabled = true;
+            selfDeviceId = id;
+            startAcceptLoop();
+            // mDNS 注册（SRV = port = TXT port）：旧纯广告模式让位，避免同名双注册冲突
+            stopAdvertisingInternal();
+            registerSignalingService(name, id, kind, port, ver == null ? "" : ver);
+            resolveServerOk(call);
+        });
+    }
+
+    private void resolveServerOk(PluginCall call) {
+        JSObject o = new JSObject();
+        o.put("ok", true);
+        o.put("port", signalingServerPort);
+        call.resolve(o);
+    }
+
+    /** 注册信令服务（复用 advertising 状态字段：getStatus.advertising 在双模式下都反映「可被发现」） */
+    private void registerSignalingService(String name, String id, String kind, int port, String ver) {
+        NsdServiceInfo info = new NsdServiceInfo();
+        info.setServiceName(id);
+        info.setServiceType(SERVICE_TYPE);
+        info.setPort(port);
+        info.setAttribute("name", name);
+        info.setAttribute("id", id);
+        info.setAttribute("kind", kind);
+        info.setAttribute("port", String.valueOf(port));
+        info.setAttribute("ver", ver);
+        registrationListener = new NsdManager.RegistrationListener() {
+            @Override
+            public void onServiceRegistered(NsdServiceInfo registered) {
+                Log.d(TAG, "信令服务已注册：serviceName=" + registered.getServiceName()
+                        + " port=" + registered.getPort());
+                PluginCall c = takePendingRegisterCall();
+                resolveOk(c);
+            }
+
+            @Override
+            public void onRegistrationFailed(NsdServiceInfo serviceInfo, int errorCode) {
+                Log.w(TAG, "信令服务注册失败 code=" + errorCode);
+                PluginCall c = takePendingRegisterCall();
+                main.post(() -> {
+                    if (advertising) { // 失败即停（与 T03 语义一致）；信令 TCP 监听不受影响
+                        advertising = false;
+                        advertisingInfo = null;
+                        registrationListener = null;
+                        syncMulticastLock();
+                    }
+                    resolveStartFailure(c, "mDNS 注册失败（code=" + errorCode + "）", false);
+                });
+            }
+
+            @Override
+            public void onServiceUnregistered(NsdServiceInfo serviceInfo) {
+            }
+
+            @Override
+            public void onUnregistrationFailed(NsdServiceInfo serviceInfo, int errorCode) {
+            }
+        };
+        advertisingInfo = info;
+        advertising = true;
+        syncMulticastLock();
+        try {
+            nsd().registerService(info, PROTOCOL, registrationListener);
+        } catch (Exception e) {
+            advertising = false;
+            advertisingInfo = null;
+            registrationListener = null;
+            syncMulticastLock();
+            Log.w(TAG, "registerService 失败：" + e);
+        }
+    }
+
+    @PluginMethod
+    public void stopSignalingServer(PluginCall call) {
+        main.post(() -> {
+            List<String> peerIds;
+            synchronized (this) {
+                peerIds = new ArrayList<>(channels.keySet());
+            }
+            for (String peerId : peerIds) {
+                ChannelContext ctx;
+                synchronized (this) {
+                    ctx = channels.get(peerId);
+                }
+                if (ctx != null) closeChannel(ctx, true); // 主动停 → 通知 JS（含对端，经 TCP 关闭传播）
+            }
+            synchronized (this) {
+                outboundPending.clear();
+            }
+            stopAdvertisingInternal(); // 取消 mDNS 注册（双模式互斥）
+            if (signalingServer != null) {
+                try {
+                    signalingServer.close(); // accept 循环抛 SocketException 退出
+                } catch (IOException ignored) {
+                }
+                signalingServer = null;
+            }
+            signalingServerPort = 0;
+            signalingEnabled = false;
+            call.resolve(okObj());
+        });
+    }
+
+    /** accept 循环（daemon）：每连接一个 reader 线程，首帧必须是 hello */
+    private void startAcceptLoop() {
+        Thread t = new Thread(() -> {
+            while (signalingServer != null) {
+                try {
+                    Socket socket = signalingServer.accept();
+                    Thread reader = new Thread(() -> handleInbound(socket), "lan-signal-inbound");
+                    reader.setDaemon(true);
+                    reader.start();
+                } catch (IOException e) {
+                    break; // 服务器关闭（stopSignalingServer）
+                }
+            }
+        }, "lan-signal-accept");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void handleInbound(Socket socket) {
+        ChannelContext ctx = new ChannelContext(socket, false, null);
+        readLoop(ctx);
+    }
+
+    @PluginMethod
+    public void connect(PluginCall call) {
+        main.post(() -> {
+            JSObject peer = call.getObject("peer");
+            String myId = call.getString("myId");
+            if (peer == null || myId == null || myId.isEmpty()) {
+                call.reject("connect 参数非法（peer/myId 必填）");
+                return;
+            }
+            String peerId = peer.getString("id");
+            Integer port = peer.getInteger("port");
+            String host = peer.getString("host");
+            if (peerId == null || port == null || port < 1 || port > 65535) {
+                call.reject("connect 参数非法（peer.id/port）");
+                return;
+            }
+            synchronized (this) {
+                if (channels.containsKey(peerId)) {
+                    call.resolve(okObj()); // 已连接（幂等：竞态消解可能已把入向通道激活）
+                    return;
+                }
+                if (outboundPending.containsKey(peerId)) {
+                    call.resolve(startFail("ALREADY_CONNECTING"));
+                    return;
+                }
+            }
+            if (host == null || host.isEmpty()) {
+                // 坑 5（多网卡 resolve host 为空）→ 明确回调（JS 提示重新发现/重试）
+                call.resolve(startFail("HOST_UNKNOWN"));
+                return;
+            }
+            selfDeviceId = myId;
+            final String peerIdF = peerId;
+            Thread t = new Thread(() -> doConnect(call, peerIdF, host, port, myId), "lan-signal-connect");
+            t.setDaemon(true);
+            t.start();
+        });
+    }
+
+    /** 出向连接（worker 线程）：connect 超时 10s → hello → 出向激活点 → 读循环 */
+    private void doConnect(PluginCall call, String peerId, String host, int port, String myId) {
+        ChannelContext ctx = null;
+        try {
+            Socket socket = new Socket();
+            socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+            ctx = new ChannelContext(socket, true, peerId);
+            ctx.session = UUID.randomUUID().toString();
+            ctx.role = "initiator";
+            synchronized (this) {
+                outboundPending.put(peerId, ctx);
+            }
+            writeFrame(socket.getOutputStream(), helloJson(myId, ctx.session));
+            activate(ctx); // 出向激活点（竞态判定在 activate 内）
+            call.resolve(okObj());
+            readLoop(ctx); // 激活后继续读帧（signal / 断线收尾）
+        } catch (SocketTimeoutException e) {
+            failConnect(call, ctx, peerId, "CONNECTION_TIMEOUT");
+        } catch (IOException e) {
+            failConnect(call, ctx, peerId, "CONNECTION_REFUSED");
+        }
+    }
+
+    private void failConnect(PluginCall call, ChannelContext ctx, String peerId, String code) {
+        if (ctx != null) {
+            ctx.terminated = true;
+            closeQuietly(ctx.socket);
+        }
+        synchronized (this) {
+            outboundPending.remove(peerId);
+        }
+        emitSignalingError(peerId, code, "连接失败：" + code);
+        call.resolve(startFail(code));
+    }
+
+    @PluginMethod
+    public void disconnect(PluginCall call) {
+        main.post(() -> {
+            String peerId = call.getString("peerId");
+            if (peerId == null) {
+                call.reject("disconnect 缺 peerId");
+                return;
+            }
+            ChannelContext ctx;
+            synchronized (this) {
+                ctx = channels.get(peerId);
+            }
+            if (ctx != null) closeChannel(ctx, true);
+            synchronized (this) {
+                ChannelContext pending = outboundPending.remove(peerId);
+                if (pending != null) closeQuietly(pending.socket);
+            }
+            call.resolve(okObj());
+        });
+    }
+
+    @PluginMethod
+    public void sendMessage(PluginCall call) {
+        main.post(() -> {
+            String peerId = call.getString("peerId");
+            String kind = call.getString("kind");
+            String sdp = call.getString("sdp");
+            if (peerId == null || sdp == null || sdp.isEmpty()
+                    || (!"offer".equals(kind) && !"answer".equals(kind))) {
+                call.reject("sendMessage 参数非法（peerId/kind(offer|answer)/sdp）");
+                return;
+            }
+            ChannelContext ctx;
+            synchronized (this) {
+                ctx = channels.get(peerId);
+            }
+            if (ctx == null) {
+                call.resolve(startFail("NOT_CONNECTED"));
+                return;
+            }
+            try {
+                writeFrame(ctx.socket.getOutputStream(), signalJson(kind, sdp));
+                call.resolve(okObj());
+            } catch (IOException e) {
+                emitSignalingError(peerId, "NOT_CONNECTED", "发送失败：" + e.getMessage());
+                call.resolve(startFail("NOT_CONNECTED"));
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // 读循环 / 帧分发 / 竞态（与 iOS 同协议同规则）
+    // ------------------------------------------------------------------
+
+    /** 读循环（连接线程）：4B 大端长度 → 恰好 length 字节 → 重复；EOF/异常 → 断线收尾 */
+    private void readLoop(ChannelContext ctx) {
+        try (DataInputStream dis = new DataInputStream(ctx.socket.getInputStream())) {
+            while (!ctx.terminated) {
+                int len;
+                try {
+                    len = dis.readInt(); // 大端（DataInputStream 默认）
+                } catch (IOException e) {
+                    break; // EOF（对端断开）/ 连接异常
+                }
+                if (len > MAX_FRAME_BYTES) {
+                    protocolViolation(ctx); // 帧长度超上限
+                    break;
+                }
+                byte[] payload = new byte[len];
+                dis.readFully(payload);
+                JSONObject msg;
+                try {
+                    msg = new JSONObject(new String(payload, StandardCharsets.UTF_8));
+                } catch (JSONException e) {
+                    protocolViolation(ctx);
+                    break;
+                }
+                if (!handleFrame(ctx, msg)) break; // 协议违规已收尾
+            }
+        } catch (IOException e) {
+            // 读取异常 → 断线收尾
+        } finally {
+            connectionEnded(ctx);
+        }
+    }
+
+    /** 帧分发：入向首帧必须是 hello；之后只收 signal（其余 → 协议违规）。返回 false = 已收尾 */
+    private boolean handleFrame(ChannelContext ctx, JSONObject msg) {
+        if (msg.optInt("v", 0) != 1) {
+            protocolViolation(ctx);
+            return false;
+        }
+        switch (msg.optString("type", "")) {
+            case "hello": {
+                if (ctx.isOutbound || ctx.peerId != null) {
+                    protocolViolation(ctx); // 接收方不回 hello；出向不应收到 hello
+                    return false;
+                }
+                String id = msg.optString("id", "");
+                String session = msg.optString("session", "");
+                if (id.isEmpty() || session.isEmpty()) {
+                    protocolViolation(ctx);
+                    return false;
+                }
+                ctx.peerId = id;
+                ctx.session = session;
+                ctx.role = "receiver";
+                activate(ctx); // 入向激活点（竞态判定在 activate 内）
+                return true;
+            }
+            case "signal": {
+                String kind = msg.optString("kind", "");
+                String sdp = msg.optString("sdp", "");
+                if ((!"offer".equals(kind) && !"answer".equals(kind)) || sdp.isEmpty()) {
+                    protocolViolation(ctx);
+                    return false;
+                }
+                if (ctx.peerId == null || ctx.session == null) {
+                    protocolViolation(ctx); // 未握手即发 signal
+                    return false;
+                }
+                JSObject evt = new JSObject();
+                evt.put("from", ctx.peerId);
+                evt.put("session", ctx.session);
+                evt.put("kind", kind);
+                evt.put("sdp", sdp);
+                notifyListeners("messageReceived", evt);
+                return true;
+            }
+            default:
+                protocolViolation(ctx);
+                return false;
+        }
+    }
+
+    /**
+     * 激活点（出向 connect 成功发完 hello / 入向收到 hello 两处调用）：
+     * 若该对端已有活跃通道 → 竞态消解（低 deviceId 胜：保留下方发起的连接）。
+     * 被弃连接：已激活的记 peerDisconnected；未激活的静默关闭（从未对外）。
+     */
+    private void activate(ChannelContext ctx) {
+        synchronized (this) {
+            if (ctx.terminated || ctx.peerId == null) return;
+            ChannelContext existing = channels.get(ctx.peerId);
+            if (existing != null && !existing.terminated) {
+                boolean keepOutbound = selfDeviceId != null && selfDeviceId.compareTo(ctx.peerId) < 0;
+                if (ctx.isOutbound == keepOutbound) {
+                    closeChannelLocked(existing, true); // 候选胜：弃现有（若已对外 → 通知）
+                    activateAsLocked(ctx);
+                } else {
+                    ctx.terminated = true; // 候选弃：静默关闭（从未激活对外）
+                    closeQuietly(ctx.socket);
+                }
+                return;
+            }
+            activateAsLocked(ctx);
+        }
+    }
+
+    private void activateAsLocked(ChannelContext ctx) {
+        channels.put(ctx.peerId, ctx);
+        JSObject evt = new JSObject();
+        evt.put("id", ctx.peerId);
+        evt.put("session", ctx.session);
+        evt.put("role", ctx.role);
+        notifyListeners("peerConnected", evt);
+    }
+
+    /** 关闭通道：通知（peerDisconnected）+ 关闭 socket（幂等） */
+    private void closeChannel(ChannelContext ctx, boolean notify) {
+        synchronized (this) {
+            closeChannelLocked(ctx, notify);
+        }
+    }
+
+    private void closeChannelLocked(ChannelContext ctx, boolean notify) {
+        if (ctx.terminated) return;
+        ctx.terminated = true;
+        if (notify && ctx.peerId != null) {
+            if (channels.get(ctx.peerId) == ctx) {
+                channels.remove(ctx.peerId);
+                notifyListeners("peerDisconnected", idObj(ctx.peerId));
+            }
+        }
+        closeQuietly(ctx.socket);
+    }
+
+    /** 连接失败 / 对端关闭 / EOF → 收尾（peerDisconnected + 清理 pending） */
+    private void connectionEnded(ChannelContext ctx) {
+        String peerId;
+        boolean notify = false;
+        synchronized (this) {
+            if (ctx.terminated) return;
+            ctx.terminated = true;
+            peerId = ctx.peerId;
+            if (peerId != null && channels.get(peerId) == ctx) {
+                channels.remove(peerId);
+                notify = true;
+            }
+            if (peerId != null && outboundPending.get(peerId) == ctx) {
+                outboundPending.remove(peerId);
+            }
+        }
+        if (notify && peerId != null) {
+            notifyListeners("peerDisconnected", idObj(peerId));
+        }
+        closeQuietly(ctx.socket);
+    }
+
+    /** 协议违规（坏帧/缺 hello/未知 type/超限）→ 关闭连接 + signalingError */
+    private void protocolViolation(ChannelContext ctx) {
+        String peerId = ctx.peerId;
+        if (peerId != null) {
+            emitSignalingError(peerId, "PROTOCOL_VIOLATION", "帧/消息非法，关闭连接");
+        } else {
+            emitSignalingError(null, "PROTOCOL_VIOLATION", "握手前非法帧，关闭连接");
+        }
+        connectionEnded(ctx);
+    }
+
+    // ------------------------------------------------------------------
+    // 帧编解码 / 事件（与 channel.ts / iOS 同格式）
+    // ------------------------------------------------------------------
+
+    private static void writeFrame(OutputStream os, JSONObject msg) throws IOException {
+        byte[] payload = msg.toString().getBytes(StandardCharsets.UTF_8);
+        if (payload.length > MAX_FRAME_BYTES) {
+            throw new IOException("frame too large");
+        }
+        DataOutputStream dos = new DataOutputStream(os);
+        dos.writeInt(payload.length); // 4B 大端长度前缀
+        dos.write(payload);
+        dos.flush();
+    }
+
+    private static JSONObject helloJson(String myId, String session) throws IOException {
+        JSONObject msg = new JSONObject();
+        try {
+            msg.put("v", 1);
+            msg.put("type", "hello");
+            msg.put("id", myId);
+            msg.put("session", session);
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+        return msg;
+    }
+
+    private static JSONObject signalJson(String kind, String sdp) throws IOException {
+        JSONObject msg = new JSONObject();
+        try {
+            msg.put("v", 1);
+            msg.put("type", "signal");
+            msg.put("kind", kind);
+            msg.put("sdp", sdp);
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+        return msg;
+    }
+
+    private void emitSignalingError(String peerId, String code, String message) {
+        JSObject evt = new JSObject();
+        if (peerId != null) evt.put("peerId", peerId);
+        evt.put("code", code);
+        evt.put("message", message);
+        notifyListeners("signalingError", evt);
+    }
+
+    private static JSObject idObj(String id) {
+        JSObject o = new JSObject();
+        o.put("id", id);
+        return o;
+    }
+
+    private static JSObject startFail(String code) {
+        JSObject o = new JSObject();
+        o.put("ok", false);
+        o.put("error", code);
+        return o;
+    }
+
+    private static void closeQuietly(Socket socket) {
+        try {
+            if (socket != null) socket.close();
+        } catch (IOException ignored) {
+        }
     }
 
     // ------------------------------------------------------------------
@@ -212,10 +803,15 @@ public class LanDiscoveryPlugin extends Plugin {
             return;
         }
         permissionDenied = false;
-        if ("startAdvertising".equals(call.getMethodName())) {
-            startAdvertisingInternal(call);
-        } else {
-            startBrowsingInternal(call);
+        switch (call.getMethodName()) {
+            case "startAdvertising":
+                startAdvertisingInternal(call);
+                break;
+            case "startSignalingServer":
+                startSignalingServerInternal(call);
+                break;
+            default:
+                startBrowsingInternal(call);
         }
     }
 
@@ -702,6 +1298,23 @@ public class LanDiscoveryPlugin extends Plugin {
         main.post(() -> {
             stopAdvertisingInternal();
             stopBrowsingInternal();
+            if (signalingServer != null) {
+                try {
+                    signalingServer.close();
+                } catch (IOException ignored) {
+                }
+                signalingServer = null;
+            }
+            synchronized (this) {
+                for (ChannelContext ctx : channels.values()) {
+                    closeQuietly(ctx.socket);
+                }
+                channels.clear();
+                for (ChannelContext ctx : outboundPending.values()) {
+                    closeQuietly(ctx.socket);
+                }
+                outboundPending.clear();
+            }
             releaseMulticastLock();
             if (workerThread != null) {
                 workerThread.quitSafely();
@@ -721,6 +1334,13 @@ public class LanDiscoveryPlugin extends Plugin {
         JSObject o = new JSObject();
         o.put("ok", true);
         call.resolve(o);
+    }
+
+    /** 成功载荷 {ok:true}（嵌入 call.resolve 的便捷形态） */
+    private static JSObject okObj() {
+        JSObject o = new JSObject();
+        o.put("ok", true);
+        return o;
     }
 
     /** 失败：resolve {ok:false, error}（权限被拒另带 permissionDenied:true）——不 reject */

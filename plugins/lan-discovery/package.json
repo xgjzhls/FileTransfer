@@ -2,7 +2,7 @@
   "name": "lan-discovery",
   "version": "0.1.0",
   "private": true,
-  "description": "ADR-0009 局域网发现插件（T02 iOS / T03 Android）：mDNS 广告/浏览（_localtranfer._tcp，TXT name/id/kind/port/ver），发现/消失/权限拒绝事件，last-seen TTL 兜底。",
+  "description": "ADR-0009 局域网发现插件（T02 iOS / T03 Android / T04 原生信令通道）：mDNS 广告/浏览（_localtranfer._tcp，TXT name/id/kind/port/ver），发现/消失/权限拒绝事件，last-seen TTL 兜底；TCP 信令服务器/连接（SRV=信令端口统一，hello/signal 帧协议，低 deviceId 竞态消解）。",
   "main": "src/index.ts",
   "types": "src/index.ts",
   "files": [

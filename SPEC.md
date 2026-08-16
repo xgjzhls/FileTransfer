@@ -1,6 +1,6 @@
 # LocalTransfer — 技术规格说明书 (SPEC)
 
-> 状态：已定稿（2026-08-13；2026-08-14 修订续传粒度，见 §3.1/§3.4）。依据：CONTEXT.md（约束/词汇）、decisions/adr/（决策）、prototype/storage-spike 分支（spike 验证结论）。
+> 状态：已定稿（2026-08-13；2026-08-14 修订续传粒度，见 §3.1/§3.4；2026-08-16 增补 §5.5/§5.6 局域网发现 + 本地信令服务器，ADR-0009）。依据：CONTEXT.md（约束/词汇）、decisions/adr/（决策）、prototype/storage-spike 分支（spike 验证结论）。
 > 范围：v1（可用优先；性能优化项标注 [v2]）。
 
 ## 1. 目标与非目标
@@ -18,6 +18,8 @@
 - **接收端存储**：OPFS + `createSyncAccessHandle`（Worker 内随机写）——spike 验证 iOS 唯一可用写入 API
 - **托管**：GitHub Pages（当前 legacy + `/docs`，见 CONTEXT.md「部署现状」）
 - **iOS app 壳（ADR-0008）**：Capacitor 8 打包同一套 Web 代码（WKWebView 承载）；app 内导出走原生文件夹选择 + 分块流式写（见 §4），网页版形态不变
+- **局域网发现（ADR-0009）**：iOS+Android app 原生 mDNS/DNS-SD（`_localtranfer._tcp`，TXT 携带设备名/ID/信令端口），app↔app 离线免扫码直连；发现后经**原生信令通道**交换 SDP（信令「单协议多载体」扩展：WS / QR / 原生通道 / 本地 WSS）
+- **本地信令服务器（ADR-0009）**：app 原生层监听 WSS（默认 8443，证书由本地 CA 签发），供桌面 Chrome 主动连入（输一次地址记住）；**只转信令**，文件数据仍 WebRTC 直连 —— 电脑腿离线免两跳
 
 ## 3. 传输协议
 
@@ -146,15 +148,37 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 - `POST /api/room` 保留：供「随机生成一个码」按钮使用（用户可自选码，也可让系统帮想）
 - **记住上次房间**：房间码持久化 `lt.lastRoom`；重开在线时自动 join 上次房间，失败/离线降级到扫码入口；设置页「退出房间」清除该值
 
+### 5.5 局域网发现（app↔app，ADR-0009）
+
+- **载体**：mDNS/DNS-SD，服务类型 `_localtranfer._tcp`；TXT 记录（RFC 6763）：`name`（设备名）、`id`（deviceId uuid）、`kind`（phone/tablet/desktop）、`port`（信令端口，T04 用）、`ver`
+- **iOS**：Network.framework `NWAdvertiser` / `NWBrowser`；`NSLocalNetworkUsageDescription` 首次弹窗授权
+- **Android**：`NsdManager` advertise/discover（INTERNET + CHANGE_WIFI_MULTICAST_STATE）；Android↔iOS 互操作（RFC 6762/6763 编码差异）需真机验证（T03）
+- **信令**：发现后发起方 TCP 连对端 `port`（原生信令通道），交换 offer/answer + ICE（复用 §5.1 `signal.payload`，单协议多载体）
+  - **wire 协议（v1，明文 TCP；TLS 留 [v2]）**：帧 = 4 字节大端长度前缀 + UTF-8 JSON，单帧上限 64 KiB（超限 = 协议违规关连接）；`hello`（发起方连上即发，接收方不回）：`{v:1,type:hello,id,session}`；`signal`：`{v:1,type:signal,kind,sdp}`（sdp = gzip+base64url，与 WS/QR 同一压缩约定）；TCP 断开 = 断线
+  - **端口**：`startSignalingServer({device})` 一体绑定 TCP 监听 + 挂 Bonjour（SRV 端口 = 监听端口 = TXT port，三处一致）；默认 8443，PORT_IN_USE 依次试 8444/8445；与旧纯广告模式（T02）双模式并存
+  - **竞态**（两台同时发起）：低 deviceId 胜 —— 幸存连接 = 低 id 方发起的连接；两侧独立套同一规则收敛，不产生双连接；幸存连接发起方 = `initiator`（即 offer 方）；任一侧可能出现瞬态事件（JS 以最终 session 为键幂等处理）
+  - **错误码**：PORT_IN_USE / CONNECTION_REFUSED / CONNECTION_TIMEOUT（10s）/ HOST_UNKNOWN（Android host 空）/ NOT_CONNECTED / ALREADY_CONNECTING / PROTOCOL_VIOLATION / INVALID_PARAMS；事件 peerConnected{id,session,role} / peerDisconnected{id} / messageReceived{from,session,kind,sdp} / signalingError{peerId?,code,message}
+- **数据面**：spike 分支 A（WKWebView DataChannel 可用，T01）→ WKWebView 内 WebRTC 直连，全部现有传输/续传/OPFS 复用；分支 B → 原生 TCP 数据面 + OPFS 写桥（对齐分块桥吞吐/峰值内存，ADR-0009 决策 3）
+- **安全**：同 LAN 直接可见可连（修订 ADR-0006 可见性门控；在线房间设备门控不变）；原生信令通道 v1 明文 TCP（LAN 信任模型下接受）；数据面 DTLS 不变
+- **边界**：AP 隔离 / 跨 VLAN 下 mDNS 失败 → 降级 QR；iOS 后台/锁屏监听受限（前台为主）；可见性开关默认开（设置可关，`lt.lanVisible`）
+
+### 5.6 本地信令服务器（电脑腿，ADR-0009）
+
+- **动机**：Chrome 网页无法被发现（纯浏览器限制），只能主动连接；https PWA → 明文 `ws://LAN-IP` 被 Chrome mixed content 硬拦；`http://IP` 顶级导航失去 secure context（OPFS 不可用）→ 必须 **WSS + 可信证书**
+- **服务器**：app 原生层监听（NWListener / ServerSocket，默认 8443），WSS，**只转信令**（SDP/ICE 在 Chrome 网页与 app 内 WKWebView 之间转发）；文件数据仍 WebRTC 直连（不违反「数据不经过任何中间设备」）
+- **证书**：`.local-certs` CA 签发，SAN 覆盖桌面连接地址；桌面 Chrome 一次性信任 CA（脚本：macOS `security add-trusted-cert` / Windows `certutil`）；机制选项（T07 定）：按 IP 重签 / CA 密钥随包 / `.local` SAN + 桌面解析能力验证
+- **地址发现**：app 界面显示地址（IP:port 或 `.local` 名），Chrome 输一次存 `lt.localServer`，重开自动重连；DHCP 换 IP 重输；失败降级现有 QR（§5.3）
+- **协议**：Chrome 网页 `wss://<addr>/ws?device=<deviceId>` 连入，与 app 端交换 signal（同 §5.1 schema）
+
 ## 6. 应用流程（UI）
 
-1. **首页（在线）**：PIN 输入框（输即加入，可「随机生成」）→ 同 PIN 设备列表（名称/类型/在线状态）→ 点选连接 → 传输区；记住的房间自动重入（ADR-0006），二次使用零操作
-2. **首页（离线 / 信令不可用）**：显示「扫码配对」入口（轻量打磨版）；自动回房失败时降级至此
+1. **首页（在线）**：PIN 输入框（输即加入，可「随机生成」）→ 同 PIN 设备列表（名称/类型/在线状态）→ 点选连接 → 传输区；记住的房间自动重入（ADR-0006），二次使用零操作；设备列表分「在线房间」「局域网发现」两区块（ADR-0009，app 端；来源标注）
+2. **首页（离线 / 信令不可用）**：显示「扫码配对」入口（轻量打磨版）与「局域网发现」区块（app 端，ADR-0009）；自动回房失败时降级至此
 3. **配对**：在线点选设备；离线走二维码（offer→answer 两次扫码，免选角色）
 4. **发送**：选文件（`<input type=file multiple>`；**选文件夹**：桌面 Chrome/Edge 走 File System Access（`showDirectoryPicker`）；iOS Safari 18.4+ / Android Chrome 走 `<input type=file webkitdirectory>`（浏览器递归返回目录树，`webkitRelativePath` 去掉首段即相对路径）；两者均不支持（如 iOS <18.4）自动降级多选文件 + 提示）→ 开始 → 每 part 进度。文件夹发送 name 为相对路径（`photos/2024/img.jpg`），接收端 OPFS 按 name 逐段重建目录
 5. **接收**：`meta` 文件清单确认 → 自动接收（逐 part 进度）→ 完成 → 导出选择：单文件（照片门控 / 存文件）；文件夹发送按顶层目录分组 →「导出 zip（保留目录结构）」/「批量分享」/「导出到文件夹…」（iOS app 版主路径 = 选文件夹 → 分块流式拷贝，ADR-0008）
 6. **断连**：在线自动重连续传；离线断线警告旁提供「重新配对」快捷入口（§5.3 打磨，一步回 offer 页），数据从 bitfield 断点继续
-7. **设置**：设备名、会话列表（续传/删除）、退出房间（清 `lt.lastRoom`）、清除全部数据
+7. **设置**：设备名、会话列表（续传/删除）、退出房间（清 `lt.lastRoom`）、**局域网可见性**（默认开，关 = 不出现在他人列表且不主动发现，`lt.lanVisible`）、清除全部数据
 8. **Wake Lock**（iOS 17+）：传输期间保持屏幕常亮；不可用时界面提示
 
 ## 7. PWA 引导
@@ -176,3 +200,4 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 7. **离线 QR**：压缩 SDP + 两次扫码配对 + 离线续传
 8. **收尾**：照片门控、批量队列 UI、Wake Lock、孤儿清理集成、多端真机联调
 9. **iOS app 壳（T01-T05，ADR-0008）**：Capacitor 脚手架 + 原生文件夹选择插件（UIDocumentPicker `.folder` + security-scoped URL）+ 分块写桥（4 MiB 背压）+ `@capacitor/share` 替换分享（**已完成 2026-08-16：T01 壳一键构建/真机安装、T02 插件四原语 + writeTemp、T03 app 内三入口导出到文件夹（峰值内存 = 块大小、取消 = 停当前文件已写保留、重名消歧复用 FSA 逻辑）、T04 分享次级、T05 文档同步；spike 验证：sync handle 729MB/s、桥 177MB/s @4MiB、文件夹写入端到端通过**；JS 编码优化标 [v2]）
+10. **局域网发现 + 电脑腿（ADR-0009，tickets 见 `.scratch/lan-discovery/issues/`）**：T01 数据面 spike（WKWebView DataChannel 可用性，WebKit bug 174500）→ T02/T03 原生发现插件（iOS/Android，mDNS）→ T04 原生信令通道 → T05 app↔app 垂直打通 → T06 UI 双区块 + 可见性开关（ADR-0006 修订落地）→ T07 本地 WSS 服务器 + 证书 → T08 Chrome 端连接（输一次记住 + 降级 QR）→ T09 多端真机验收（离线主场景全链路）

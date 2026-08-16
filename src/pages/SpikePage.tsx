@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Capacitor } from '@capacitor/core'
 import type { PluginListenerHandle } from '@capacitor/core'
 import { FolderExport } from 'folder-export'
-import { LanDiscovery, DeviceRegistry } from 'lan-discovery'
+import { LanDiscovery, DeviceRegistry, LAN_CHANNEL_EVENTS } from 'lan-discovery'
 import type { DeviceInfo, TrackedDevice } from 'lan-discovery'
 import { runOpfsQuotaTest, clearOpfsTestData, type OpfsQuotaResult } from '../spike/opfs'
 import { runStreamDownloadTest, type StreamDownloadResult } from '../spike/streamDownload'
@@ -220,7 +220,7 @@ export default function SpikePage() {
     id: getOrCreateDeviceId(),
     // 插件 schema 只收 phone/tablet/desktop（SPEC §5.5）；detectKind 的 'other' 归为 phone
     kind: detectedKind === 'other' ? 'phone' : detectedKind,
-    port: 8443, // T04 信令端口占位（仅写入 TXT，不参与发现）
+    port: 8443, // T04 信令端口默认值（SPEC §5.5；探针起服务器时若被占依次试 8444/8445）
     ver: '1',
   }
 
@@ -238,6 +238,19 @@ export default function SpikePage() {
       }),
       LanDiscovery.addListener('permissionDenied', () => {
         setLanLog((l) => [...l, '⚠️ 本地网络权限被拒：设置 → 隐私与安全性 → 本地网络 → 开启 LocalTransfer'])
+      }),
+      // T04 信令通道事件（真机验收用）
+      LanDiscovery.addListener(LAN_CHANNEL_EVENTS.peerConnected, (e) => {
+        setLanLog((l) => [...l, `⚡ peerConnected ${e.id} session=${e.session} role=${e.role}`])
+      }),
+      LanDiscovery.addListener(LAN_CHANNEL_EVENTS.peerDisconnected, ({ id }) => {
+        setLanLog((l) => [...l, `⚡ peerDisconnected ${id}`])
+      }),
+      LanDiscovery.addListener(LAN_CHANNEL_EVENTS.messageReceived, (e) => {
+        setLanLog((l) => [...l, `⚡ messageReceived ${e.from} ${e.kind} sdp=${e.sdp.slice(0, 40)}…`])
+      }),
+      LanDiscovery.addListener(LAN_CHANNEL_EVENTS.signalingError, (e) => {
+        setLanLog((l) => [...l, `⚡ signalingError ${e.peerId ?? '(无)'} ${e.code}：${e.message}`])
       }),
     ]
     return () => { void Promise.all(unsubs).then((hs) => hs.forEach((h) => h.remove())) }
@@ -295,6 +308,74 @@ export default function SpikePage() {
       lanPush(`getStatus → ${JSON.stringify(await LanDiscovery.getStatus())}`)
     } catch (e) {
       lanPush(`getStatus 失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+
+  // ---- T04 原生信令通道探针（真机待验：建通道 + SDP 互发 + 竞态）----
+  const [lanServerPort, setLanServerPort] = useState<number | null>(null)
+
+  async function handleServer(on: boolean) {
+    setLanBusy(on ? '信令服务器' : '停信令服务器')
+    try {
+      if (on) {
+        // PORT_IN_USE 依次试 8443/8444/8445（SPEC §5.5 默认 8443）
+        for (const port of [8443, 8444, 8445]) {
+          const r = await LanDiscovery.startSignalingServer({ device: { ...advertOptions, port } })
+          if (r.ok) {
+            lanPush(`startSignalingServer(port=${port}) → ${JSON.stringify(r)}`)
+            setLanServerPort(port)
+            return
+          }
+          lanPush(`startSignalingServer(port=${port}) → ${JSON.stringify(r)}`)
+          if (r.error !== 'PORT_IN_USE') return
+        }
+      } else {
+        const r = await LanDiscovery.stopSignalingServer()
+        lanPush(`stopSignalingServer → ${JSON.stringify(r)}`)
+        setLanServerPort(null)
+      }
+    } catch (e) {
+      lanPush(`信令服务器失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
+  async function handleChannelConnect(device: TrackedDevice) {
+    setLanBusy(`连接 ${device.name}`)
+    try {
+      const r = await LanDiscovery.connect({ peer: device, myId: advertOptions.id })
+      lanPush(`connect(${device.name}) → ${JSON.stringify(r)}`)
+    } catch (e) {
+      lanPush(`connect 失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
+  async function handleChannelSend(device: TrackedDevice, kind: 'offer' | 'answer') {
+    setLanBusy(`发送 ${kind}`)
+    try {
+      // 压缩约定与 WS/QR 同一套（SPEC §5.1）：sdp 对原生透明，探针直接塞占位串
+      const sdp = `probe-${kind}-${Date.now()}`
+      const r = await LanDiscovery.sendMessage({ peerId: device.id, kind, sdp })
+      lanPush(`sendMessage(${device.name}, ${kind}) → ${JSON.stringify(r)}`)
+    } catch (e) {
+      lanPush(`sendMessage 失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
+  async function handleChannelDisconnect(device: TrackedDevice) {
+    setLanBusy(`断开 ${device.name}`)
+    try {
+      const r = await LanDiscovery.disconnect({ peerId: device.id })
+      lanPush(`disconnect(${device.name}) → ${JSON.stringify(r)}`)
+    } catch (e) {
+      lanPush(`disconnect 失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
     }
   }
 
@@ -408,8 +489,8 @@ export default function SpikePage() {
         {nativeProbe && <pre className="mono">{nativeProbe}</pre>}
       </Card>
 
-      <Card title="测试 5：局域网发现插件（ADR-0009 / T02，仅 app 内）">
-        <p>T02 验收：两台 iOS app 实例同 Wi-Fi 下互发现（发现 → 消失 → 重发现）。广告 TXT = name/id/kind/port/ver（RFC 6763）。首次使用会弹本地网络授权。</p>
+      <Card title="测试 5：局域网发现插件（ADR-0009 / T02 + T04，仅 app 内）">
+        <p>T02 验收：两台 iOS app 实例同 Wi-Fi 下互发现（发现 → 消失 → 重发现）。T04 验收：发现后起信令服务器 → 点设备连接（发起方 TCP 连对端 TXT port）→ 双向发 offer/answer；两台同时点连接验证竞态（低 deviceId 胜，不产生双连接）。首次使用会弹本地网络授权。</p>
         <p className="mono">isNativePlatform: {String(IS_NATIVE)}</p>
         <p className="mono">本机广告参数: {JSON.stringify(advertOptions)}</p>
         <div className="row">
@@ -419,14 +500,26 @@ export default function SpikePage() {
           <button onClick={() => handleBrowse(false)} disabled={!!lanBusy || !IS_NATIVE}>停止浏览</button>
           <button onClick={handleLanStatus} disabled={!!lanBusy || !IS_NATIVE}>状态</button>
         </div>
+        <div className="row">
+          <button onClick={() => handleServer(true)} disabled={!!lanBusy || !IS_NATIVE} title="绑定 8443（被占依次试 8444/8445）+ 挂 Bonjour（SRV=TXT=监听端口）">
+            {lanBusy === '信令服务器' ? '启动中…' : lanServerPort ? `信令服务器 :${lanServerPort}` : '启动信令服务器'}
+          </button>
+          <button onClick={() => handleServer(false)} disabled={!!lanBusy || !IS_NATIVE}>停信令服务器</button>
+        </div>
         {!IS_NATIVE && <p className="bad">仅 app 内可用（浏览器无 mDNS/DNS-SD 能力，ADR-0009）</p>}
         {lanDevices.length === 0 && !lanLog.length ? null : (
           <>
             <p className="mono">发现的设备（{lanDevices.length}）：</p>
             <ul>
-              {lanDevices.map((d) => (
+              {lanDevices.filter((d) => d.id !== advertOptions.id).map((d) => (
                 <li key={d.id} className="mono">
                   {d.name}（{d.kind}，port {d.port}，ver {d.ver}）service={d.serviceName}@{d.domain} 首次 {new Date(d.firstSeen).toLocaleTimeString()} 最后 {new Date(d.lastSeen).toLocaleTimeString()}
+                  <div className="row">
+                    <button onClick={() => handleChannelConnect(d)} disabled={!!lanBusy}>连接</button>
+                    <button onClick={() => handleChannelSend(d, 'offer')} disabled={!!lanBusy}>发 offer</button>
+                    <button onClick={() => handleChannelSend(d, 'answer')} disabled={!!lanBusy}>发 answer</button>
+                    <button onClick={() => handleChannelDisconnect(d)} disabled={!!lanBusy}>断开</button>
+                  </div>
                 </li>
               ))}
             </ul>
