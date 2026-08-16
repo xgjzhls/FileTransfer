@@ -1,6 +1,6 @@
 # T22: 解除导出/预检大小上限（不设限制）
 
-- 状态：进行中
+- 状态：✅ 代码完成（`npm test` 367 全绿 + build + lint ✓；docs/ 部署产物已刷新并提交）
 - 阻塞：无
 - 被阻塞者：无
 - 引用：SPEC §4（1 GiB 导出守卫、2 GiB 探测上限）；`src/transfer/folderExport.ts`（`ZIP_TOTAL_GUARD_BYTES`）；`src/storage/capacityCheck.ts`（`PROBE_CAP_BYTES`）；`src/storage/capacity.ts`（`interpretCapacity` 超上限文案）
@@ -21,7 +21,7 @@
 
 ## 验收标准（done when）
 
-- [ ] `src/transfer/folderExport.ts` 移除 `ZIP_TOTAL_GUARD_BYTES`；`Home.tsx` 移除 4 处守卫拦截 + `guardSelectedBytes` 及 3 处调用
-- [ ] `capacity.ts` 超封顶文案改为说明性（含「传输本身不设大小上限」），不再出现「上限/限制」措辞
-- [ ] SPEC.md / CONTEXT.md 同步更新
-- [ ] `npm test` 全量绿；lint + build ✓；docs/ 部署产物刷新
+- [x] `src/transfer/folderExport.ts` 移除 `ZIP_TOTAL_GUARD_BYTES`；`Home.tsx` 移除 4 处守卫拦截 + `guardSelectedBytes` 及 3 处调用
+- [x] `capacity.ts` 超封顶文案改为说明性（含「传输本身不设大小上限」），不再出现「上限/限制」措辞
+- [x] SPEC.md / CONTEXT.md 同步更新
+- [x] `npm test` 全量绿；lint + build ✓；docs/ 部署产物刷新
