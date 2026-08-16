@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- NsdManager 广告/浏览（mDNS 组播）所需权限（SPEC §5.5：INTERNET + CHANGE_WIFI_MULTICAST_STATE） -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- Android 13+（API 33+）：Wi-Fi 邻近设备发现 API（含 NsdManager）需该权限；
+         neverForLocation 声明 = 不关联位置权限。运行时按需请求（见 LanDiscoveryPlugin）。 -->
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+</manifest>

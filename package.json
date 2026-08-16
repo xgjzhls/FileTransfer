@@ -13,6 +13,7 @@
     "ios:deploy": "bash scripts/ios-deploy.sh"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
     "@capacitor/core": "^8.5.0",
     "@capacitor/ios": "^8.5.0",
     "@capacitor/share": "^8.0.1",

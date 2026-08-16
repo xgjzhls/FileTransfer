@@ -128,7 +128,7 @@ try {
   ok('往返延迟测量完成')
 
   await pA.evaluate((n) => window.__ltSpike.runThroughput(n), THROUGHPUT_BYTES)
-  await waitFor(() => pA.evaluate(() => document.querySelector('#res').textContent.includes('吞吐')), 'A 吞吐结果', 60_000)
+  await waitFor(() => pA.evaluate(() => document.querySelector('#res').textContent.includes('接收端')), 'A 吞吐结果', 60_000)
   const resA = (await pA.textContent('#res')).trim()
   console.log(`  ${resA}`)
   const recvB = await pB.evaluate(() => window.__ltSpike.recvBytes)
@@ -139,7 +139,7 @@ try {
   ok(`A→B 吞吐字节核对：发送 ${sentA} = 接收 ${recvB}`)
 
   await pB.evaluate((n) => window.__ltSpike.runThroughput(n), THROUGHPUT_BYTES)
-  await waitFor(() => pB.evaluate(() => document.querySelector('#res').textContent.includes('吞吐')), 'B 吞吐结果', 60_000)
+  await waitFor(() => pB.evaluate(() => document.querySelector('#res').textContent.includes('接收端')), 'B 吞吐结果', 60_000)
   const recvA = await pA.evaluate(() => window.__ltSpike.recvBytes)
   if (recvA !== THROUGHPUT_BYTES) throw new Error(`B→A 字节不一致：${recvA}`)
   ok(`B→A 吞吐字节核对：接收 ${recvA}`)

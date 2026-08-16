@@ -36,6 +36,10 @@ build/
 # 本地插件 Xcode/SPM 元数据（xcodebuild 解析 SPM 时生成，勿入库）
 plugins/folder-export/.swiftpm/
 
+# 本地插件 Android 构建产物（Gradle 生成，勿入库）
+plugins/lan-discovery/android/build/
+plugins/lan-discovery/android/.gradle/
+
 # 用完即弃的原型（完整源码在分支 prototype/ios-app-spike，勿进 main）
 spike/
 
