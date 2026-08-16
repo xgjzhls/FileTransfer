@@ -17,6 +17,7 @@
 - **信令服务**：Cloudflare Workers + Durable Objects（免费档），纯转发不落盘
 - **接收端存储**：OPFS + `createSyncAccessHandle`（Worker 内随机写）——spike 验证 iOS 唯一可用写入 API
 - **托管**：GitHub Pages（当前 legacy + `/docs`，见 CONTEXT.md「部署现状」）
+- **iOS app 壳（ADR-0008）**：Capacitor 8 打包同一套 Web 代码（WKWebView 承载）；app 内导出走原生文件夹选择 + 分块流式写（见 §4），网页版形态不变
 
 ## 3. 传输协议
 
@@ -85,14 +86,15 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 - **分区**：iOS 各浏览器/独立 PWA 存储分区隔离 —— 数据写入与清理必须同一浏览器/模式（spike 实测）
 - **导出**：完成后拼接 → `navigator.share({ files })`：
   - 单文件：`image/*|video/*` 且 < 300 MiB → 分享面板可「存储到照片」；大文件 → 「存储到文件」，界面提示可经 Files 分享面板导入照片（原生分享可处理大文件；spike 实测 ~600MiB 视频经 Web Share 崩溃）
-  - **文件夹发送（name 含 `/`）**：接收端按顶层目录分组（`groupTopLevel`），目录组提供三种结构保持导出：
+  - **文件夹发送（name 含 `/`）**：接收端按顶层目录分组（`groupTopLevel`），目录组提供三种结构保持导出（`导出到文件夹…` 分桌面 FSA 与 iOS app 两实现，见各条目）：
     - **导出 zip（deflate 均衡压缩，level 6）**：整棵目录树打包为单个 zip（`zip.ts` T23 自写流式 zip 写入器——本地头+数据描述符+中央目录，fflate 流式 `Deflate`/`AsyncDeflate`（worker）+ 自带 CRC-32，ondrain/链式背压，内存恒定不整包驻留；小条目 ≤4 MiB 同步压缩避免每条目起 worker；UTF-8 文件名；单条目 ≤ 4GiB zip32 上限），分享（目标端「文件」App 选位置后原生解压；仅移动端——桌面 navigator.share 需激活尚在，压缩耗时后已失效会 NotAllowedError）或下载（桌面/无分享能力自动降级，两端一致）
     - **导出到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标目录 → 按相对路径逐段建目录写入文件树（`fsaExport.ts`，File.stream() 分块写，零驻留），无需解压即还原目录结构
+    - **导出到文件夹…（iOS app 版，ADR-0008）**：app 内 `UIDocumentPickerViewController(.folder)` 选目标文件夹（一次，会话内有效）→ 保持相对路径逐段建目录 → OPFS 磁盘背书 File 的 `stream()` 分块（默认 4 MiB）经 JS↔原生桥逐块写（原生 `NSFileHandle`），**峰值内存 = 块大小**，目录树原生还原无需解压；分享面板（`@capacitor/share`）降级为次级按钮
     - **批量分享**：组内全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；`shareNames` basename + 父目录前缀消歧；磁盘背书 File 零拷贝，T23）
     - **根目录组**：散文件发送（name 无 `/`，如文件夹根目录文件）归入「全部文件/根目录」组，同样提供批量导出（zip/导出到文件夹/批量分享）；重名条目 zip/目录导出用 `uniqueZipPaths` 追加序号
     - 导出不设大小上限（T22 移除 1 GiB 守卫）；T23 流式化：单文件/批量分享走 OPFS 磁盘背书 File（`getFile()` 零拷贝），zip 流式压缩写 OPFS exports/ 临时文件（`withOpfsTempFile`），不再整载内存——700MB 级多文件分享不再因内存爆失败
   - **多选批量导出（T20）**：接收列表已完成文件行带复选框，可跨顶层目录组勾选任意组合，勾选后提供三种批量操作（现有逐文件与分组导出全部保留）：
-    - **导出选中到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标 → 保持相对路径写入（`photos/a.jpg` → 目标目录下 `photos/a.jpg`；根目录散文件放目标根），无需解压
+    - **导出选中到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标 → 保持相对路径写入（`photos/a.jpg` → 目标目录下 `photos/a.jpg`；根目录散文件放目标根），无需解压（iOS app 版同 §4「导出到文件夹…（iOS app 版）」）
     - **导出选中 zip**：跨组勾选打包为单个 zip（deflate level 6；分享/下载路由同分组 zip）
     - **批量分享选中（手机）**：shareNames 消歧，一次进分享面板（子目录拍平）
     - 新会话（meta）自动清空勾选；仅 `status === 'done'` 可勾（导出不设大小上限，T22）；路径消歧用 `disambiguateRootVsDir`——根散文件与目录首段同名时目录优先、散文件追加序号（FSA 建文件/建目录同名冲突会抛错）
@@ -150,7 +152,7 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 2. **首页（离线 / 信令不可用）**：显示「扫码配对」入口（轻量打磨版）；自动回房失败时降级至此
 3. **配对**：在线点选设备；离线走二维码（offer→answer 两次扫码，免选角色）
 4. **发送**：选文件（`<input type=file multiple>`；**选文件夹**：桌面 Chrome/Edge 走 File System Access（`showDirectoryPicker`）；iOS Safari 18.4+ / Android Chrome 走 `<input type=file webkitdirectory>`（浏览器递归返回目录树，`webkitRelativePath` 去掉首段即相对路径）；两者均不支持（如 iOS <18.4）自动降级多选文件 + 提示）→ 开始 → 每 part 进度。文件夹发送 name 为相对路径（`photos/2024/img.jpg`），接收端 OPFS 按 name 逐段重建目录
-5. **接收**：`meta` 文件清单确认 → 自动接收（逐 part 进度）→ 完成 → 导出选择：单文件（照片门控 / 存文件）；文件夹发送按顶层目录分组 →「导出 zip（保留目录结构）」/「批量分享」
+5. **接收**：`meta` 文件清单确认 → 自动接收（逐 part 进度）→ 完成 → 导出选择：单文件（照片门控 / 存文件）；文件夹发送按顶层目录分组 →「导出 zip（保留目录结构）」/「批量分享」/「导出到文件夹…」（iOS app 版主路径 = 选文件夹 → 分块流式拷贝，ADR-0008）
 6. **断连**：在线自动重连续传；离线断线警告旁提供「重新配对」快捷入口（§5.3 打磨，一步回 offer 页），数据从 bitfield 断点继续
 7. **设置**：设备名、会话列表（续传/删除）、退出房间（清 `lt.lastRoom`）、清除全部数据
 8. **Wake Lock**（iOS 17+）：传输期间保持屏幕常亮；不可用时界面提示
@@ -173,3 +175,4 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 6. **续传**：bitfield 持久化 + resume_manifest 握手 + 自动重连（在线）
 7. **离线 QR**：压缩 SDP + 两次扫码配对 + 离线续传
 8. **收尾**：照片门控、批量队列 UI、Wake Lock、孤儿清理集成、多端真机联调
+9. **iOS app 壳（T24+，ADR-0008）**：Capacitor 脚手架 + 原生文件夹选择插件（UIDocumentPicker `.folder` + security-scoped URL）+ 分块写桥（4 MiB 背压）+ `@capacitor/share` 替换分享 + 真机验证（WKWebView sync handle / 桥吞吐）

@@ -7,7 +7,7 @@
 零安装的局域网 P2P 文件传输：iPhone ↔ iPad ↔ 电脑（全是浏览器），传输过程无需互联网，无需任何原生应用。
 
 ## 已确立的约束（不可变）
-- **不做原生应用**：iOS 不做 app（App Store 付费 + 开发版签名时限）；电脑端不做桌面 app（统一用网页）
+- **不做原生应用**（**2026-08-16 修订，ADR-0008**）：iOS 增加 Capacitor 打包壳（同一套 Web 代码，用于原生「选文件夹 → 分块流式导出」，接受个人免费签名 7 天重签代价）；电脑端不做桌面 app（统一用网页）；网页版形态不变
 - **数据面永远离线可用**：文件数据始终在局域网内设备间 P2P 直连，不经过任何服务器，不依赖互联网；信令面允许「在线发现（轻量信令服务）+ 离线二维码兜底」（ADR-0004）
 - **局域网 P2P**：数据在两端设备间直连，不经过任何中间设备
 - **电脑不必在场**：手机↔iPad 互传时只有这两台设备开机；电脑只参与涉及它的传输
@@ -25,6 +25,7 @@
 | 接收端存储 | **OPFS + createSyncAccessHandle（Worker 内随机写）**（spike 验证：iOS 唯一可用写入 API；配额宽松 40GB+） | 见「关键风险」 |
 | 发送端读取 | `<input type=file multiple>` + `file.slice()` 流式读 | 不把整文件载入内存 |
 | 外部依赖 | 零 | 运行时全程无互联网 |
+| iOS app 导出（ADR-0008） | Capacitor 8 壳 + `UIDocumentPicker(.folder)` 选文件夹 + 分块写桥（4 MiB） | 网页版 share 整载内存无解、iOS 无 FSA picker；原生选择器 + 分块流式 = 峰值内存 = 块大小 |
 
 ## 部署现状（T01 起）
 - 托管：GitHub Pages（https://xgjzhls.github.io/FileTransfer/），**legacy 模式**（Deploy from a branch）
@@ -41,6 +42,7 @@
 - [ADR-0005](decisions/adr/0005-resume-and-datachannel.md)：传输协议 —— bitfield 粒度续传 + ordered DataChannel
 - [ADR-0006](decisions/adr/0006-symmetric-pin-discovery.md)：发现与配对 —— 对称 PIN 房间 + 离线扫码兜底
 - [ADR-0007](decisions/adr/0007-offline-pairing-two-hop.md)：离线配对保持「两跳」——拒绝一扫码旁路（**完全离线是用户主场景**）
+- [ADR-0008](decisions/adr/0008-ios-app-folder-export.md)：iOS 打包 app + 原生文件夹选择，分块流式导出（**修订约束「不做原生应用」**）
 
 ## 规格说明
 - **[SPEC.md](SPEC.md)** 为传输协议、存储层、信令、UI、PWA 的正式规格（v1 定稿）。协议细节（消息 schema、状态机、续传握手、参数表）以 SPEC 为准，本文件不再重复维护草案。
@@ -56,12 +58,14 @@
 - 文件夹发送（T18/T19）：iOS Safari 18.4+ / Android Chrome 用 `webkitdirectory` 选文件夹（桌面 Chrome 维持 File System Access）；接收端导出三种——「导出 zip（deflate level 6 均衡压缩，保留目录结构）」/「导出到文件夹…（桌面 FSA 选目标目录，无需解压）」/「批量分享（收进一个文件夹，子目录拍平）」，导出不设大小上限（T22）；T23 流式化：单文件/批量分享用 OPFS 磁盘背书 File（`getFile()` 零拷贝，不再 readMerged 整载内存），zip 用自写流式写入器（fflate 流式 Deflate/AsyncDeflate + 自带 CRC-32，数据描述符，ondrain 背压）写 OPFS exports/ 临时文件再分享/下载，700MB 级多文件导出不再内存爆
 - 多选批量导出（T20）：接收列表复选框多选（仅已完成文件，可跨顶层目录组勾选），三种批量操作——「导出选中到文件夹…」（桌面 FSA，保持相对路径：photos/a.jpg → 目标目录下 photos/a.jpg，根目录散文件放目标根）/「导出选中 zip」（跨组打包，deflate level 6，手机分享/桌面下载路由同分组 zip）/「批量分享选中」（手机，shareNames 消歧）；导出不设大小上限（T22）；新会话（meta）自动清空勾选；现有逐文件与分组导出全部保留
 - 点击放大全屏（T21）：离线配对 offer/answer 二维码均可点击放大为全屏超大码（min(88vw,82vh)，渲染上限 1024），点码外空白处 / Esc 关闭（SPEC §5.3）
+- iOS app 壳 + 原生文件夹导出（ADR-0008，2026-08-16 已接受）：「先选文件夹 → 分块流式拷贝」在纯网页版物理不可行（iOS Safari 无 FSA picker，WebKit 反对）→ 方案 = Capacitor 打包 + `UIDocumentPicker(.folder)` 选文件夹（一次，会话内）→ security-scoped URL → OPFS 磁盘背书 File 的 `stream()` 分块（4 MiB）经桥逐块写，峰值内存 = 块大小；分享面板降级次级按钮（`@capacitor/share`）；v1 每次重选文件夹（不持久化）；iOS 先行，Android 后续单独评估；桌面 FSA 直写不动（重名冲突复用 uniqueZipPaths 追加序号；取消 = 停止当前文件、已写保留）
 
 ## 开放问题（待拍板 / 待验证）
 1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。
    - **存照片（spike 测试 3）**：Web Share 小文件正常；~600MB 视频调起分享时页面崩溃重载（渲染进程崩溃）→ **大视频不能可靠经 Web Share 进照片库**。设计决策：照片选项按大小阈值门控（<~300MB 走 Web Share 存照片）；大视频存「文件」App，提示用户经 Files 分享面板导入照片（原生分享可处理大文件）；Safari 与 Chrome 的边界差异待测
 2. ~~电脑无摄像头时的离线 QR fallback（手动粘贴 answer 文本）~~ **已实现（T07）**：发送端与接收端均支持「手动粘贴配对码文本」替代扫码（电脑无摄像头场景；同时覆盖离线重连后的重新配对）。真机（两部 iPhone / iPhone+Mac 纯局域网）联调待验（T07 验收 6，T08 多端联调）
 3. **真机验证（ADR-0006）**：对称 PIN 自动回房在 iOS Safari 独立 PWA 模式下的表现（后台恢复 / 重载后自动 join 与设备列表恢复）
+4. **iOS app 壳真机验证（ADR-0008）**：WKWebView 内 createSyncAccessHandle（接收写入路径）与分块桥吞吐
 
 ## 关键风险
 - ~~iOS Safari 存储配额~~ **已解除（见开放问题 #1）**；新注意点：配额随剩余空间波动，正式版传输前需容量预警
@@ -71,6 +75,7 @@
 - 锁屏 / 后台杀连接 → Wake Lock（iOS 17+）+ 部分粒度续传缓解
 - **孤儿数据**：传输/测试中断（页面被杀）会遗留 OPFS 中的部分文件且不可见 → 正式版需：会话 manifest 跟踪已收部分；启动时扫描孤儿数据并提示清理；设置页提供「清除全部数据」
 - **iOS 存储分区**：iOS 上每个浏览器的网站数据独立存放（Safari / Chrome 等各一个分区），iOS 16.4+ 的独立 PWA 又是另一个分区——spike 实测：Chrome 分区里占 60GB，在 Safari 里清理看到 0。正式版需锁定数据写入与清理都在同一浏览器/模式；另外 iOS `navigator.storage.estimate()` 恒返回 0，不能依赖
+- **iOS app 壳（ADR-0008）新增风险**：需 Xcode（当前开发机未装，前置步骤）；个人免费签名 7 天过期需重签；SW 在 Capacitor/WKWebView 不可用（离线语义变为本地资源打包，spike 的 SW 流式下载在 app 内无意义，vite-plugin-pwa 注入需对 app 构建禁用）；网页版 OPFS 数据不随 app 迁移（存储分区不同）
 
 ## 词汇表
 - **房间码**：在线信令服务中的会话标识，设备凭码加入同一房间并互相可见；ADR-0006 后即「对称 PIN」（两端输同码自动建房/加入）
@@ -86,3 +91,6 @@
 - **续传块（64MiB）**：bitfield 粒度单位，1 bit = 256 帧；每 part（512MiB）8 块；崩溃最多重传 64MiB + 在途
 - **spike**：验证假设的抛原型（如 10GB 配额验证页）
 - **安全上下文 secure context**：浏览器授予摄像头/麦克风等权限的前提；HTTPS 或 localhost 才满足，局域网 http://IP 不满足
+- **Capacitor**：把现有 Web 代码打包成原生 app 的容器（iOS = WKWebView + 原生桥插件）；本仓库用于 iOS 导出壳（ADR-0008，修订「不做原生应用」约束）
+- **security-scoped URL**：iOS 文档选择器授予的、可跨进程访问的沙盒外资源引用；访问前需 `startAccessingSecurityScopedResource()` 声明、结束 `stopAccessing()`——app 获得用户所选文件夹读写权的机制
+- **分块流式导出**：OPFS 磁盘背书 File 的 `stream()` 按固定块（默认 4 MiB）经 JS↔原生桥逐块写入目标文件，峰值内存 = 块大小，不整载文件（ADR-0008）
