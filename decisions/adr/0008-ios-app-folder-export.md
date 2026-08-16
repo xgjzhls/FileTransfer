@@ -49,3 +49,11 @@
   - **SW 在 Capacitor 不可用**:离线缓存语义改变(资源随包),spike 的 SW 流式下载逻辑在 app 内无意义;vite-plugin-pwa 注入需对 app 构建禁用
   - OPFS 数据不随 app 迁移(存储分区不同)
   - 待真机验证:WKWebView 内 `createSyncAccessHandle`(接收写入路径)行为、桥吞吐
+
+## 验证结论(2026-08-16,prototype/ios-app-spike,iPhone 11 真机)
+
+- **探针 A**(WKWebView worker 内 `createSyncAccessHandle`):通过 — 128MiB 写入无异常无崩溃,**729 MB/s**(远高于阈值)→ 接收写入路径(现有 storage worker)进壳无改动风险
+- **探针 B**(4/8/16 MiB 分块过桥):**4MiB 177 / 8MiB 146 / 16MiB 135 MB/s** → 块越小越快,**4 MiB 块大小确认**(与默认一致);桥+落盘本身无瓶颈;JS 侧 base64 编码为真实瓶颈(4MiB 编码 61ms ≈69MB/s,端到端 ≈49 MB/s,10GB ≈3.5 分钟;正式插件用 FileReader/worker 编码优化,标 [v2])
+- **探针 C**(`UIDocumentPicker(.folder)` + security-scoped 写入):通过 — 测试文件落进「文件」App 用户所选文件夹(File Provider Storage 路径确认 Files 集成可见)
+- **桥参数契约**:Capacitor 桥**不自动转换 TypedArray**(只转 Blob)→ 二进制必须 JS 侧显式 base64 或 Blob
+- spike 完整记录:`spike/ios-app/RESULTS.md`(原型分支 `prototype/ios-app-spike`,提交 657291f)

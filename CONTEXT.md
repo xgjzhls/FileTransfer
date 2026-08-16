@@ -65,7 +65,7 @@
    - **存照片（spike 测试 3）**：Web Share 小文件正常；~600MB 视频调起分享时页面崩溃重载（渲染进程崩溃）→ **大视频不能可靠经 Web Share 进照片库**。设计决策：照片选项按大小阈值门控（<~300MB 走 Web Share 存照片）；大视频存「文件」App，提示用户经 Files 分享面板导入照片（原生分享可处理大文件）；Safari 与 Chrome 的边界差异待测
 2. ~~电脑无摄像头时的离线 QR fallback（手动粘贴 answer 文本）~~ **已实现（T07）**：发送端与接收端均支持「手动粘贴配对码文本」替代扫码（电脑无摄像头场景；同时覆盖离线重连后的重新配对）。真机（两部 iPhone / iPhone+Mac 纯局域网）联调待验（T07 验收 6，T08 多端联调）
 3. **真机验证（ADR-0006）**：对称 PIN 自动回房在 iOS Safari 独立 PWA 模式下的表现（后台恢复 / 重载后自动 join 与设备列表恢复）
-4. **iOS app 壳真机验证（ADR-0008）**：WKWebView 内 createSyncAccessHandle（接收写入路径）与分块桥吞吐
+4. ~~iOS app 壳真机验证（ADR-0008）~~ **已完成（2026-08-16 真机实测，prototype/ios-app-spike，iPhone 11）**：WKWebView 内 sync access handle 可用（**729 MB/s**）；分块桥 4MiB **177** / 8MiB 146 / 16MiB 135 MB/s → **4 MiB 块大小确认**；选文件夹 + security-scoped 写入端到端通过；JS 侧 base64 编码为真实瓶颈（端到端 ≈50 MB/s，[v2] 优化）
 
 ## 关键风险
 - ~~iOS Safari 存储配额~~ **已解除（见开放问题 #1）**；新注意点：配额随剩余空间波动，正式版传输前需容量预警
@@ -75,7 +75,7 @@
 - 锁屏 / 后台杀连接 → Wake Lock（iOS 17+）+ 部分粒度续传缓解
 - **孤儿数据**：传输/测试中断（页面被杀）会遗留 OPFS 中的部分文件且不可见 → 正式版需：会话 manifest 跟踪已收部分；启动时扫描孤儿数据并提示清理；设置页提供「清除全部数据」
 - **iOS 存储分区**：iOS 上每个浏览器的网站数据独立存放（Safari / Chrome 等各一个分区），iOS 16.4+ 的独立 PWA 又是另一个分区——spike 实测：Chrome 分区里占 60GB，在 Safari 里清理看到 0。正式版需锁定数据写入与清理都在同一浏览器/模式；另外 iOS `navigator.storage.estimate()` 恒返回 0，不能依赖
-- **iOS app 壳（ADR-0008）新增风险**：需 Xcode（当前开发机未装，前置步骤）；个人免费签名 7 天过期需重签；SW 在 Capacitor/WKWebView 不可用（离线语义变为本地资源打包，spike 的 SW 流式下载在 app 内无意义，vite-plugin-pwa 注入需对 app 构建禁用）；网页版 OPFS 数据不随 app 迁移（存储分区不同）
+- **iOS app 壳（ADR-0008）新增风险**：需 Xcode（当前开发机未装，前置步骤）；个人免费签名 7 天过期需重签；SW 在 Capacitor/WKWebView 不可用（离线语义变为本地资源打包，spike 的 SW 流式下载在 app 内无意义，vite-plugin-pwa 注入需对 app 构建禁用）；网页版 OPFS 数据不随 app 迁移（存储分区不同）；~~WKWebView 内 sync access handle / 桥吞吐待真机验证~~ **已验**（2026-08-16：729 MB/s / 177 MB/s @4MiB，见开放问题 #4）
 
 ## 词汇表
 - **房间码**：在线信令服务中的会话标识，设备凭码加入同一房间并互相可见；ADR-0006 后即「对称 PIN」（两端输同码自动建房/加入）
