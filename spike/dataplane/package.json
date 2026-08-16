@@ -1,0 +1,20 @@
+{
+  "name": "dataplane-spike",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PROTOTYPE — 验证 WKWebView(Capacitor) 内 WebRTC DataChannel 可用性(见 README)。用完即弃,别进 main。",
+  "type": "module",
+  "scripts": {
+    "add:ios": "cap add ios",
+    "sync": "cap sync ios",
+    "smoke": "node smoke/smoke.mjs",
+    "serve": "node smoke/serve.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.0"
+  }
+}

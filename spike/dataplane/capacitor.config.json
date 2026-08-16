@@ -1,0 +1,8 @@
+{
+  "appId": "local.transfer.dataplane",
+  "appName": "LT-Dataplane",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "automatic"
+  }
+}

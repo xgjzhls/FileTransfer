@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>LocalTransfer 数据面 spike</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 15px/1.55 -apple-system, "PingFang SC", sans-serif; margin: 0; padding: 16px;
+         background: #0f1115; color: #d7dae0; }
+  h1 { font-size: 19px; margin: 4px 0 2px; }
+  .meta { font-size: 12px; color: #8b919c; word-break: break-all; margin-bottom: 18px; }
+  .card { background: #161a21; border: 1px solid #232a35; border-radius: 10px;
+          padding: 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 14px; margin: 0 0 6px; color: #aeb6c2; }
+  .card p, .card li { font-size: 12.5px; color: #8b919c; margin: 0 0 8px; }
+  .card ul { margin: 0 0 8px; padding-left: 18px; }
+  label { display: block; font-size: 12.5px; color: #aeb6c2; margin-bottom: 8px; }
+  input, select { background: #0a0c10; color: #d7dae0; border: 1px solid #2a3340;
+                  border-radius: 6px; padding: 6px 8px; font-size: 13px; margin-left: 6px;
+                  max-width: 90%; }
+  input#room { width: 110px; letter-spacing: 3px; text-transform: uppercase; }
+  button { background: #2a6df4; color: #fff; border: 0; border-radius: 8px;
+           padding: 9px 14px; font-size: 13.5px; margin: 0 8px 8px 0; }
+  button:disabled { background: #3a4250; color: #8b919c; }
+  button.sec { background: #39424f; }
+  .mono { font: 12px/1.55 ui-monospace, Menlo, monospace; background: #0a0c10;
+          border: 1px solid #232a35; border-radius: 8px; padding: 10px;
+          white-space: pre-wrap; word-break: break-all; margin: 8px 0; }
+  .ok { color: #4cd07d; } .err { color: #ff7a7a; } .warn { color: #ffd166; }
+  #log { max-height: 42vh; overflow: auto; }
+</style>
+</head>
+<body>
+  <h1>LocalTransfer — 数据面 spike（WKWebView DataChannel 可用性）</h1>
+  <div class="meta" id="meta">…</div>
+
+  <div class="card">
+    <h2>0 · 环境自检</h2>
+    <pre class="mono" id="env">…</pre>
+    <p>关键判据：<strong>secure context</strong>（WKWebView 的 capacitor://localhost 应为 true）、<strong>RTCPeerConnection</strong> 存在、本页标记 <strong>isCapacitor / WKWebView</strong>。Chrome 端作为对照组。</p>
+  </div>
+
+  <div class="card">
+    <h2>1 · 信令（复用正式信令服务器，只转发 SDP；数据面不经过它）</h2>
+    <p>两端加入同一个 4 位房间码。先加入的是「设备 A」，后加入的是「设备 B」。房间码两端必须一致。</p>
+    <label>信令服务器
+      <input id="sigUrl" type="url" value="wss://localtransfer-signaling.dirichray.workers.dev/ws" />
+    </label>
+    <label>房间码 <input id="room" maxlength="4" placeholder="如 7K2M" /> <button class="sec" id="btnRand">随机</button></label>
+    <button id="btnJoin">加入房间</button>
+    <button id="btnLeave" class="sec">离开房间</button>
+    <pre class="mono" id="peers">未加入房间</pre>
+  </div>
+
+  <div class="card">
+    <h2>2 · 摄像头/麦克风权限（WebKit bug 174500）</h2>
+    <p>仅数据通道的直连在 WKWebView 里疑似强制要求摄像头/麦克风权限。本卡验证两条路径：</p>
+    <ul>
+      <li><strong>冷启动</strong>：不点下方按钮，直接到卡片 3 建连 → 记录是否成功 + 报错原文 + 是否自动弹权限窗</li>
+      <li><strong>先授权</strong>：点下方按钮触发系统权限弹窗（允许）→ 再建连 → 记录是否成功</li>
+    </ul>
+    <button id="btnGrant">授权摄像头/麦克风（触发系统弹窗）</button>
+    <pre class="mono" id="grantRes">未请求过</pre>
+  </div>
+
+  <div class="card">
+    <h2>3 · 建连测试（DataChannel-only，无媒体流）</h2>
+    <p>任一端点「发起连接」向对端发 offer（非 trickle，gather 完成后整包 SDP）；对端自动回 answer。建连耗时与状态见下方。</p>
+    <button id="btnOffer">发起连接（本机 = offer 发起方）</button>
+    <button id="btnClose" class="sec">断开</button>
+    <pre class="mono" id="conn">idle</pre>
+  </div>
+
+  <div class="card">
+    <h2>4 · 数据面：延迟 / 吞吐 / 内存 / 后台</h2>
+    <p>通道打开后可用。<strong>吞吐 = 本机 → 对端</strong>（64 KiB/块 + 背压），对端统计实际字节与耗时。接收端若发现收包间隙 &gt; 2s 会标红（后台/锁屏挂起信号）。内存峰值：Chrome 自动采样；WKWebView 无 performance.memory → 请配合 Xcode 内存仪表观察。</p>
+    <label>数据量
+      <select id="size">
+        <option value="33554432">32 MiB</option>
+        <option value="67108864" selected>64 MiB</option>
+        <option value="134217728">128 MiB</option>
+        <option value="268435456">256 MiB</option>
+      </select>
+    </label>
+    <button id="btnLat">往返延迟（ping-pong ×20）</button>
+    <button id="btnThrough">跑吞吐（本机 → 对端）</button>
+    <pre class="mono" id="res">（跑吞吐时若方便：把 app 切到后台 5 秒再回来，观察对端日志是否出现「收包间隙」）</pre>
+  </div>
+
+  <div class="card">
+    <h2>5 · 日志（跑完复制/导出，贴回给 agent）</h2>
+    <pre class="mono" id="log">…</pre>
+    <button id="btnCopy">复制日志</button>
+    <button id="btnDl" class="sec">导出日志文件</button>
+  </div>
+
+  <script src="spike.js"></script>
+</body>
+</html>
