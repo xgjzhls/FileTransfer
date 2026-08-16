@@ -44,11 +44,11 @@
   - 一次选文件夹,多个文件顺序分块写入,目录树原生还原
   - 网页版体验不受影响(壳只影响 app 内导出路由)
 - 负面 / 边界:
-  - **前置:Xcode**(当前开发机未装,需先安装);个人免费签名 7 天过期需重签(自己用可接受)
+  - **前置:Xcode**（已装 2026-08-16，Xcode 16.4；开发团队 `TJ5797TJ3N` 已配置进 pbxproj）;个人免费签名 7 天过期需重签（`bash scripts/ios-deploy.sh` 一键重签，README.md 有说明）
   - 字节仍过 JS↔原生桥,**非零拷贝**,但分块流动使峰值有界
-  - **SW 在 Capacitor 不可用**:离线缓存语义改变(资源随包),spike 的 SW 流式下载逻辑在 app 内无意义;vite-plugin-pwa 注入需对 app 构建禁用
-  - OPFS 数据不随 app 迁移(存储分区不同)
-  - 待真机验证:WKWebView 内 `createSyncAccessHandle`(接收写入路径)行为、桥吞吐
+  - **SW 在 Capacitor 不可用**:离线缓存语义改变(资源随包),spike 的 SW 流式下载逻辑在 app 内无意义;vite-plugin-pwa 注入需对 app 构建禁用（已实现：LT_APP_BUILD=1 时 vite 配置替换为 stub，app 产物无 sw.js、不注册）
+  - OPFS 数据不随 app 迁移(存储分区不同;设置页已加提示)
+  - ~~待真机验证~~ **已验（2026-08-16，见下）**:WKWebView 内 `createSyncAccessHandle`(接收写入路径)行为、桥吞吐、选文件夹写入
 
 ## 验证结论(2026-08-16,prototype/ios-app-spike,iPhone 11 真机)
 

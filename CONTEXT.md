@@ -33,6 +33,7 @@
 - 流程：改代码 → `npm run build` → `rm -rf docs && mkdir docs && cp -r dist/* docs/ && rm -f docs/sw.ts && touch docs/.nojekyll` → **恢复代理文档 `git checkout HEAD -- docs/agents`（docs/ 同时承载 docs/agents/*.md，rm -rf 会误删）** → 提交推送（Pages 自动重建）
 - SW：vite-plugin-pwa injectManifest（`public/sw.ts` → dist/sw.js，预缓存全部资源 + spike 流式逻辑）
 - 注意：早期试过 Actions workflow + deploy-pages，因 `github-pages` 环境的 branch_policy 拦截失败，已弃用；正式版可回归 Actions 模式（需先改环境策略）
+- **iOS app 壳（ADR-0008）**：根级 Capacitor 工程（`capacitor.config.ts` + `ios/`，SPM 模式）；`npm run build:app`（LT_APP_BUILD=1 禁用 SW 注入）→ `npx cap sync ios` → `bash scripts/ios-deploy.sh`（xcodebuild + devicectl 一键安装启动真机）；插件 `plugins/folder-export`（pickFolder/mkdir/writeChunk/abort/writeTemp）经 SPM 自动链接注册（cap sync 扫描 packageClassList），无需手改原生工程；构建产物随包（离线语义 = 本地资源）
 
 ## 架构决策记录
 - [ADR-0001](decisions/adr/0001-browser-webrtc-no-native-apps.md)：浏览器 + WebRTC，零原生应用
@@ -58,7 +59,7 @@
 - 文件夹发送（T18/T19）：iOS Safari 18.4+ / Android Chrome 用 `webkitdirectory` 选文件夹（桌面 Chrome 维持 File System Access）；接收端导出三种——「导出 zip（deflate level 6 均衡压缩，保留目录结构）」/「导出到文件夹…（桌面 FSA 选目标目录，无需解压）」/「批量分享（收进一个文件夹，子目录拍平）」，导出不设大小上限（T22）；T23 流式化：单文件/批量分享用 OPFS 磁盘背书 File（`getFile()` 零拷贝，不再 readMerged 整载内存），zip 用自写流式写入器（fflate 流式 Deflate/AsyncDeflate + 自带 CRC-32，数据描述符，ondrain 背压）写 OPFS exports/ 临时文件再分享/下载，700MB 级多文件导出不再内存爆
 - 多选批量导出（T20）：接收列表复选框多选（仅已完成文件，可跨顶层目录组勾选），三种批量操作——「导出选中到文件夹…」（桌面 FSA，保持相对路径：photos/a.jpg → 目标目录下 photos/a.jpg，根目录散文件放目标根）/「导出选中 zip」（跨组打包，deflate level 6，手机分享/桌面下载路由同分组 zip）/「批量分享选中」（手机，shareNames 消歧）；导出不设大小上限（T22）；新会话（meta）自动清空勾选；现有逐文件与分组导出全部保留
 - 点击放大全屏（T21）：离线配对 offer/answer 二维码均可点击放大为全屏超大码（min(88vw,82vh)，渲染上限 1024），点码外空白处 / Esc 关闭（SPEC §5.3）
-- iOS app 壳 + 原生文件夹导出（ADR-0008，2026-08-16 已接受）：「先选文件夹 → 分块流式拷贝」在纯网页版物理不可行（iOS Safari 无 FSA picker，WebKit 反对）→ 方案 = Capacitor 打包 + `UIDocumentPicker(.folder)` 选文件夹（一次，会话内）→ security-scoped URL → OPFS 磁盘背书 File 的 `stream()` 分块（4 MiB）经桥逐块写，峰值内存 = 块大小；分享面板降级次级按钮（`@capacitor/share`）；v1 每次重选文件夹（不持久化）；iOS 先行，Android 后续单独评估；桌面 FSA 直写不动（重名冲突复用 uniqueZipPaths 追加序号；取消 = 停止当前文件、已写保留）
+- iOS app 壳 + 原生文件夹导出（ADR-0008，2026-08-16 已接受，**T01-T05 已完成 2026-08-16**）：「先选文件夹 → 分块流式拷贝」在纯网页版物理不可行（iOS Safari 无 FSA picker，WebKit 反对）→ 方案 = Capacitor 打包 + `UIDocumentPicker(.folder)` 选文件夹（一次，会话内）→ security-scoped URL → OPFS 磁盘背书 File 的 `stream()` 分块（4 MiB）经桥逐块写，峰值内存 = 块大小；分享面板降级次级按钮（`@capacitor/share`）；v1 每次重选文件夹（不持久化）；iOS 先行，Android 后续单独评估；桌面 FSA 直写不动（重名冲突复用 uniqueZipPaths 追加序号；取消 = 停止当前文件、已写保留）
 
 ## 开放问题（待拍板 / 待验证）
 1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。
@@ -75,7 +76,7 @@
 - 锁屏 / 后台杀连接 → Wake Lock（iOS 17+）+ 部分粒度续传缓解
 - **孤儿数据**：传输/测试中断（页面被杀）会遗留 OPFS 中的部分文件且不可见 → 正式版需：会话 manifest 跟踪已收部分；启动时扫描孤儿数据并提示清理；设置页提供「清除全部数据」
 - **iOS 存储分区**：iOS 上每个浏览器的网站数据独立存放（Safari / Chrome 等各一个分区），iOS 16.4+ 的独立 PWA 又是另一个分区——spike 实测：Chrome 分区里占 60GB，在 Safari 里清理看到 0。正式版需锁定数据写入与清理都在同一浏览器/模式；另外 iOS `navigator.storage.estimate()` 恒返回 0，不能依赖
-- **iOS app 壳（ADR-0008）新增风险**：需 Xcode（当前开发机未装，前置步骤）；个人免费签名 7 天过期需重签；SW 在 Capacitor/WKWebView 不可用（离线语义变为本地资源打包，spike 的 SW 流式下载在 app 内无意义，vite-plugin-pwa 注入需对 app 构建禁用）；网页版 OPFS 数据不随 app 迁移（存储分区不同）；~~WKWebView 内 sync access handle / 桥吞吐待真机验证~~ **已验**（2026-08-16：729 MB/s / 177 MB/s @4MiB，见开放问题 #4）
+- **iOS app 壳（ADR-0008）新增风险**：个人免费签名 7 天过期需重签（`bash scripts/ios-deploy.sh` 一键重签，README.md 有说明）；SW 在 Capacitor/WKWebView 不可用（离线语义变为本地资源打包，spike 的 SW 流式下载在 app 内无意义，app 构建已禁用 vite-plugin-pwa 注入）；网页版 OPFS 数据不随 app 迁移（存储分区不同，设置页有提示）；~~WKWebView 内 sync access handle / 桥吞吐待真机验证~~ **已验**（2026-08-16：729 MB/s / 177 MB/s @4MiB，见开放问题 #4）
 
 ## 词汇表
 - **房间码**：在线信令服务中的会话标识，设备凭码加入同一房间并互相可见；ADR-0006 后即「对称 PIN」（两端输同码自动建房/加入）

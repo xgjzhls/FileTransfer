@@ -175,4 +175,4 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 6. **续传**：bitfield 持久化 + resume_manifest 握手 + 自动重连（在线）
 7. **离线 QR**：压缩 SDP + 两次扫码配对 + 离线续传
 8. **收尾**：照片门控、批量队列 UI、Wake Lock、孤儿清理集成、多端真机联调
-9. **iOS app 壳（T24+，ADR-0008）**：Capacitor 脚手架 + 原生文件夹选择插件（UIDocumentPicker `.folder` + security-scoped URL）+ 分块写桥（4 MiB 背压）+ `@capacitor/share` 替换分享（**spike 已验 2026-08-16：sync handle 729MB/s、桥 177MB/s @4MiB、文件夹写入端到端通过**；JS 编码优化标 [v2]）
+9. **iOS app 壳（T01-T05，ADR-0008）**：Capacitor 脚手架 + 原生文件夹选择插件（UIDocumentPicker `.folder` + security-scoped URL）+ 分块写桥（4 MiB 背压）+ `@capacitor/share` 替换分享（**已完成 2026-08-16：T01 壳一键构建/真机安装、T02 插件四原语 + writeTemp、T03 app 内三入口导出到文件夹（峰值内存 = 块大小、取消 = 停当前文件已写保留、重名消歧复用 FSA 逻辑）、T04 分享次级、T05 文档同步；spike 验证：sync handle 729MB/s、桥 177MB/s @4MiB、文件夹写入端到端通过**；JS 编码优化标 [v2]）

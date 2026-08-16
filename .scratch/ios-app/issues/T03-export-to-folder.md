@@ -1,6 +1,22 @@
 # T03: 「导出到文件夹…」—— app 内分块流式拷贝(核心诉求)
 
-**状态:** ready-for-agent
+**状态:** ✅ 代码完成（2026-08-16）；真机 ≥1GB / 批量验收待跑（随 T05）
+
+**完成记录:**
+- 三种入口（单文件 / 目录组 / 多选勾选）在 app 内（IS_NATIVE）主路径 = 「导出到文件夹…」：选文件夹 → 保持相对路径逐段建目录 → 磁盘背书 File 分块（4 MiB base64）过桥写 → 目录树原生还原，无需 zip
+- 重名/根散文件冲突消歧复用 FSA 同款：uniqueZipPaths（组）/ disambiguateRootVsDir（多选）；单文件 = 原名
+- 逐文件进度（当前文件 + N/total 完成）+ 取消按钮（停当前文件、已写保留；桥 abort 清理半成品）
+- 失败/取消语义清晰；picking/copying/done/cancelled/error 五态
+- 编码优化（FileReader/worker）未做，标 [v2]（与 ADR 一致）
+- 网页版零改动（所有 native 路由 IS_NATIVE 门控）
+
+**验收对照:**
+- [x] 三入口 app 内主路径（网页版不受影响）
+- [x] 目录树原生还原（photos/a.jpg → 目标目录下 photos/a.jpg）
+- [ ] ≥1GB 文件导出全程不崩溃、峰值内存 ≈ 块大小（真机观察，随 T05）
+- [x] 取消停当前文件已写保留；重名自动追加序号
+- [x] 逐文件进度；失败清晰报错
+- [x] `npm test`/build/lint 全绿；网页版回归通过
 
 **阻塞:** T01、T02
 

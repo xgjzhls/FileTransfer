@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { defineConfig, type Plugin } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { readFileSync } from 'node:fs'
@@ -12,6 +12,22 @@ const httpsOptions = isHttps
     }
   : undefined
 
+// ADR-0008：app 构建（LT_APP_BUILD=1）禁用 vite-plugin-pwa —— Service Worker 在
+// Capacitor/WKWebView 不可用（非 http(s) scheme），壳内离线由本地打包资源承担。
+// main.tsx 静态 import 'virtual:pwa-register'，禁用时用无操作 stub 顶替保证编译通过。
+const isAppBuild = process.env.LT_APP_BUILD === '1'
+function pwaStubPlugin(): Plugin {
+  return {
+    name: 'pwa-stub',
+    resolveId(id) {
+      if (id === 'virtual:pwa-register') return '\0pwa-stub'
+    },
+    load(id) {
+      if (id === '\0pwa-stub') return 'export const registerSW = () => {}'
+    },
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   base: './', // GitHub Pages 子路径部署（/FileTransfer/）
@@ -21,7 +37,7 @@ export default defineConfig({
   },
   plugins: [
     react(),
-    VitePWA({
+    ...(isAppBuild ? [pwaStubPlugin()] : [VitePWA({
       strategies: 'injectManifest',
       registerType: 'autoUpdate',
       manifest: {
@@ -36,7 +52,7 @@ export default defineConfig({
           { src: './favicon.svg', sizes: 'any', type: 'image/svg+xml' },
         ],
       },
-    }),
+    })]),
   ],
   test: {
     environment: 'node',

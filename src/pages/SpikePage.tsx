@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
+import { Capacitor } from '@capacitor/core'
+import { FolderExport } from 'folder-export'
 import { runOpfsQuotaTest, clearOpfsTestData, type OpfsQuotaResult } from '../spike/opfs'
 import { runStreamDownloadTest, type StreamDownloadResult } from '../spike/streamDownload'
+import { createNativeExportBridge } from '../native/bridge'
+import { copyFileToNative } from '../transfer/nativeExport'
+
+const IS_NATIVE = Capacitor.isNativePlatform()
 
 type SwState = 'unsupported' | 'registering' | 'controlled' | 'uncontrolled'
 
@@ -121,6 +127,66 @@ export default function SpikePage() {
     }
   }
 
+  // ---- Test 4: 原生文件夹导出插件（T02）----
+  const [nativeProbe, setNativeProbe] = useState('')
+  const [nativeBusy, setNativeBusy] = useState(false)
+
+  /** 复用正式泵的分块吞吐 + 目录还原验证（T02 验收） */
+  async function handleNativeProbe() {
+    setNativeBusy(true)
+    setNativeProbe('运行中…')
+    try {
+      const bridge = createNativeExportBridge()
+      const picked = await FolderExport.pickFolder()
+      if (!picked.ok) throw new Error('pickFolder 未 ok')
+      const lines: string[] = [`已选文件夹: ${picked.folderName}（${picked.folderPath}）`]
+
+      // 1) 目录树还原 + 内容校验：photos/2024/a.txt（嵌套目录）与顶层 b.txt
+      const payloads = [
+        { relPath: 'photos/2024/a.txt', data: new Uint8Array(2 * 1024 * 1024 + 3) },
+        { relPath: 'b.txt', data: new Uint8Array(1024) },
+      ]
+      for (let i = 0; i < payloads.length; i++) {
+        const p = payloads[i]
+        for (let k = 0; k < p.data.length; k++) p.data[k] = (k * 7 + i) & 0xff
+        await copyFileToNative({ bridge, file: new File([p.data], p.relPath), relPath: p.relPath })
+        lines.push(`✓ 写入 ${p.relPath}（${p.data.length} B，目录 ${i === 0 ? 'photos/2024/ 嵌套' : '顶层'}）`)
+      }
+
+      // 2) 分块过桥吞吐：64 MiB 泵完（复用正式泵，块 4MiB）
+      const total = 64 * 1024 * 1024
+      const t0 = performance.now()
+      const big = new Uint8Array(total)
+      for (let k = 0; k < big.length; k++) big[k] = k & 0xff
+      await copyFileToNative({ bridge, file: new File([big], 'throughput.bin'), relPath: 'throughput.bin' })
+      const dt = (performance.now() - t0) / 1000
+      lines.push(`✓ 64 MiB 分块过桥: ${(total / 1e6 / dt).toFixed(1)} MB/s（含 JS base64 编码）`)
+
+      // 3) abort：写 64MiB 文件中途取消，确认半成品被清理（已写文件保留）
+      const ctrl = new AbortController()
+      const t1 = performance.now()
+      let chunks = 0
+      const abortProbe = copyFileToNative({
+        bridge,
+        file: new File([big], 'abort.bin'),
+        relPath: 'abort.bin',
+        signal: ctrl.signal,
+        onProgress: () => {
+          chunks++
+          if (chunks === 2 && performance.now() - t1 > 30) ctrl.abort() // 第 2 块后取消
+        },
+      }).catch((e) => (e.name === 'NativeExportAbortedError' ? 'aborted' : Promise.reject(e)))
+      const aborted = await abortProbe
+      lines.push(aborted === 'aborted' ? '✓ abort 生效（中途取消，已写文件保留）' : `✗ abort 未生效: ${aborted}`)
+      lines.push('→ 去「文件」App 核对：photos/2024/a.txt、b.txt、throughput.bin 存在且大小正确；abort.bin 不存在（半成品已清理）')
+      setNativeProbe(lines.join('\n'))
+    } catch (e) {
+      setNativeProbe(`失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setNativeBusy(false)
+    }
+  }
+
   async function handleShare() {
     if (pickedFiles.length === 0) return
     setShareResult('分享中…')
@@ -234,6 +300,16 @@ export default function SpikePage() {
           {!navigator.share && <span className="bad">此浏览器不支持 Web Share</span>}
         </div>
         {shareResult && <p>{shareResult}</p>}
+      </Card>
+
+      <Card title="测试 4：原生文件夹导出插件（T02，仅 iOS app 内）">
+        <p>ADR-0008 正式插件验收：pickFolder 选文件夹 → mkdir 嵌套目录 → writeChunk 分块写（4 MiB，含吞吐）→ abort 取消清理。非壳（网页）环境按钮不可用。</p>
+        <p className="mono">isNativePlatform: {String(IS_NATIVE)}</p>
+        <button onClick={handleNativeProbe} disabled={nativeBusy || !IS_NATIVE}>
+          {nativeBusy ? '运行中…' : '选文件夹并跑插件探针'}
+        </button>
+        {!IS_NATIVE && <p className="bad">仅 app 内可用（网页版请用桌面 FSA / zip / 分享路径）</p>}
+        {nativeProbe && <pre className="mono">{nativeProbe}</pre>}
       </Card>
     </>
   )

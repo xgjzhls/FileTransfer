@@ -6,12 +6,18 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:app": "tsc -b && LT_APP_BUILD=1 vite build",
     "lint": "oxlint",
     "test": "vitest run",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "ios:deploy": "bash scripts/ios-deploy.sh"
   },
   "dependencies": {
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/ios": "^8.5.0",
+    "@capacitor/share": "^8.0.1",
     "fflate": "^0.8.3",
+    "folder-export": "file:plugins/folder-export",
     "qr-scanner": "^1.4.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
@@ -19,6 +25,7 @@
     "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.0",
     "@cloudflare/workers-types": "^5.20260813.1",
     "@types/node": "^24.13.3",
     "@types/qrcode": "^1.5.6",

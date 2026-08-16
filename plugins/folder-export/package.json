@@ -1,0 +1,17 @@
+{
+  "name": "folder-export",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ADR-0008 原生文件夹导出插件（T02）：pickFolder(UIDocumentPicker .folder + security-scoped URL) / mkdir(逐段建目录) / writeChunk(4MiB 分块 base64 写) / abort(中断+清理半成品) / writeTemp(@capacitor/share 用临时文件)。",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": [
+    "ios",
+    "src"
+  ],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    }
+  }
+}

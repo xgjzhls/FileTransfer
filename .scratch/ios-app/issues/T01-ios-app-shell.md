@@ -1,6 +1,15 @@
 # T01: iOS app 壳骨架(现有 PWA 全流程在真机跑通)
 
-**状态:** ready-for-agent
+**状态:** ✅ 代码完成（2026-08-16）；真机已安装启动（iPhone 11 · iOS 18，devicectl launch 成功）；配对/收发/导出真机验收项并入 T05 执行
+
+**完成记录:**
+- 根级 Capacitor 8 工程（SPM 模式）：`capacitor.config.ts`（appId local.transfer.app, webDir dist）+ `ios/` 平台目录
+- 一键脚本 `scripts/ios-deploy.sh`：build:app → cap sync → xcodebuild（自动签名，DEVELOPMENT_TEAM 已入 pbxproj）→ devicectl 安装+启动
+- Info.plist 相机权限（NSCameraUsageDescription 中文说明）
+- app 构建禁用 SW：vite.config `LT_APP_BUILD=1` 时替换 VitePWA 为 pwa-stub（`virtual:pwa-register` 无操作），产物无 sw.js；网页构建不受影响
+- `npm test`/build/lint 全绿；Pages 流程未动（docs/ 仍由 web 构建产物承载）
+
+**真机验证（已做）:** xcodebuild BUILD SUCCEEDED → devicectl install/launch 成功（iPhone 11）
 
 **阻塞:** 无(可立即开工)
 

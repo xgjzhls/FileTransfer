@@ -21,6 +21,11 @@ import { buildZipStream } from '../transfer/zip'
 import type { ZipStreamEntry } from '../transfer/zip'
 import { writeFileStreamTree } from '../transfer/fsaExport'
 import { opfsMergedFile, withOpfsTempFile, writableChunkSink } from '../storage/opfsExport'
+import { IS_NATIVE } from '../native/env'
+import { createNativeExportBridge } from '../native/bridge'
+import { downloadFileNative, shareFilesNative, type NativeShareFile } from '../native/share'
+import { caseInsensitiveUnique, copyFilesToNative } from '../transfer/nativeExport'
+import { FolderExport, PICKER_CANCELLED } from 'folder-export'
 import { WakeLockManager } from '../wakelock/wakeLock'
 import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
@@ -66,6 +71,18 @@ interface RecvItem {
   status: 'receiving' | 'done'
   receivedChunks: number
   totalChunks: number
+}
+
+/** T03：app 内「导出到文件夹…」进度状态（ADR-0008） */
+interface NativeExportState {
+  phase: 'idle' | 'picking' | 'copying' | 'done' | 'cancelled' | 'error'
+  folderName?: string
+  totalFiles: number
+  doneFiles: number
+  currentName?: string
+  currentWritten?: number
+  currentTotal?: number
+  message?: string
 }
 
 /**
@@ -626,6 +643,22 @@ export default function Home() {
       // 文件夹发送的文件名含相对路径（photos/a.jpg）：导出/下载必须用 basename
       // （a.download 与 share File.name 不允许路径分隔符）
       const name = basename(item.name)
+      if (IS_NATIVE) {
+        // 壳内（ADR-0008 #3/#4）：分享/下载都经 @capacitor/share（WKWebView 无可靠
+        // navigator.share / a.download）；下载 = 分享面板选「存储到文件」
+        const target = classifyExport(name, item.size)
+        if (mode === 'download') {
+          await downloadFileNative(file, name)
+        } else {
+          await shareFilesNative([{ file, name }], name, target === 'photo' ? '存储到照片' : '存储到文件')
+        }
+        setExportMsg(
+          mode === 'download'
+            ? `已分享 ${name}（面板选「存储到文件」）`
+            : `已分享 ${name}（面板选「存储到照片 / 存储到文件」）`,
+        )
+        return
+      }
       if (mode === 'download') {
         // 零拷贝：objectURL 由浏览器从磁盘流式读（不再整载内存，T23）
         downloadBlob(file, name)
@@ -708,6 +741,18 @@ export default function Home() {
     try {
       const zipName = `${group.dir || '全部文件'}.zip`
       const file = await streamZipToFile(zipName, group.items, uniqueZipPaths(group.items))
+      if (IS_NATIVE) {
+        // 壳内：@capacitor/share（zip 在 OPFS exports/，先落临时文件）
+        try {
+          await shareFilesNative([{ file, name: zipName }], zipName, '存储到文件后解压，即还原目录结构')
+          setExportMsg(`已分享 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
+        } catch (shareErr) {
+          if ((shareErr as Error).name !== 'AbortError') {
+            setExportMsg(`分享失败：${shareErr instanceof Error ? shareErr.message : String(shareErr)}`)
+          }
+        }
+        return
+      }
       if (CAN_SHARE_FILES && !HAS_FSA_PICKER) {
         try {
           await navigator.share({ files: [shareableFile(file, zipName)], title: zipName, text: '存储到文件后解压，即还原目录结构' })
@@ -762,6 +807,15 @@ export default function Home() {
     setExportMsg('正在准备分享…')
     try {
       const names = shareNames(group.items)
+      if (IS_NATIVE) {
+        const files: NativeShareFile[] = []
+        for (const it of group.items) {
+          files.push({ file: await mergedFileOf(it), name: names.get(it)! })
+        }
+        await shareFilesNative(files, group.dir, '存储到文件（多个文件收进一个文件夹，子目录拍平）')
+        setExportMsg(`已批量分享 ${group.items.length} 个文件（分享面板选「存储到文件」）`)
+        return
+      }
       const files: File[] = []
       for (const it of group.items) {
         const shareName = names.get(it)!
@@ -781,6 +835,77 @@ export default function Home() {
 
   const orphanCount = orphans?.orphans.length ?? 0
 
+  // ── T03：app 内「导出到文件夹…」（ADR-0008 主路径；桌面 FSA 路径不动）──
+  const [nativeExport, setNativeExport] = useState<NativeExportState>({
+    phase: 'idle',
+    totalFiles: 0,
+    doneFiles: 0,
+  })
+  const nativeAbortRef = useRef<AbortController | null>(null)
+  const nativeBridgeRef = useRef(createNativeExportBridge())
+
+  /**
+   * T03 主路径：选文件夹 → 保持相对路径逐段建目录 → 4MiB 分块流式拷贝
+   * （目录树原生还原，无需 zip；取消 = 停当前文件、已写保留）。
+   * paths：重名/根散文件冲突消歧复用 FSA 同款逻辑（uniqueZipPaths / disambiguateRootVsDir），
+   * 壳内再补一轮 APFS 大小写不敏感消歧（caseInsensitiveUnique，追加序号不覆盖）。
+   */
+  async function exportToNativeFolder(items: RecvItem[], paths: Map<RecvItem, string>) {
+    if (!sessionId || items.length === 0) return
+    setNativeExport({ phase: 'picking', totalFiles: items.length, doneFiles: 0 })
+    try {
+      const picked = await FolderExport.pickFolder()
+      const ctrl = new AbortController()
+      nativeAbortRef.current = ctrl
+      setNativeExport({
+        phase: 'copying',
+        folderName: picked.folderName,
+        totalFiles: items.length,
+        doneFiles: 0,
+      })
+      try {
+        const safePaths = caseInsensitiveUnique(paths)
+        const entries: { file: File; relPath: string }[] = []
+        for (const it of items) {
+          entries.push({ file: await mergedFileOf(it), relPath: safePaths.get(it)! })
+        }
+        const res = await copyFilesToNative({
+          bridge: nativeBridgeRef.current,
+          entries,
+          signal: ctrl.signal,
+          onFileStart: (_i, name, totalBytes) =>
+            setNativeExport((s) => ({ ...s, currentName: name, currentWritten: 0, currentTotal: totalBytes })),
+          onFileProgress: (_i, written, total) =>
+            setNativeExport((s) => ({ ...s, currentWritten: written, currentTotal: total })),
+          onFileDone: () => setNativeExport((s) => ({ ...s, doneFiles: s.doneFiles + 1 })),
+        })
+        setNativeExport(
+          res.cancelled
+            ? { phase: 'cancelled', folderName: picked.folderName, totalFiles: items.length, doneFiles: res.copied }
+            : { phase: 'done', folderName: picked.folderName, totalFiles: items.length, doneFiles: res.copied },
+        )
+      } finally {
+        nativeAbortRef.current = null
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg === PICKER_CANCELLED || (e as Error).name === 'NativeExportAbortedError') {
+        setNativeExport({ phase: 'cancelled', totalFiles: items.length, doneFiles: 0 })
+        return
+      }
+      setNativeExport({
+        phase: 'error',
+        totalFiles: items.length,
+        doneFiles: 0,
+        message: `导出失败：${msg}`,
+      })
+    }
+  }
+
+  function cancelNativeExport(): void {
+    nativeAbortRef.current?.abort()
+  }
+
   /** T20：导出选中 zip（跨组打包，deflate level 6；分享/下载路由同分组 zip；流式零驻留，T23） */
   async function exportSelectedZip() {
     if (selectedItems.length === 0) return
@@ -788,6 +913,17 @@ export default function Home() {
     try {
       const zipName = '选中文件.zip'
       const file = await streamZipToFile(zipName, selectedItems, disambiguateRootVsDir(selectedItems))
+      if (IS_NATIVE) {
+        try {
+          await shareFilesNative([{ file, name: zipName }], zipName, '存储到文件后解压，即还原目录结构')
+          setExportMsg(`已分享 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
+        } catch (shareErr) {
+          if ((shareErr as Error).name !== 'AbortError') {
+            setExportMsg(`分享失败：${shareErr instanceof Error ? shareErr.message : String(shareErr)}`)
+          }
+        }
+        return
+      }
       if (CAN_SHARE_FILES && !HAS_FSA_PICKER) {
         try {
           await navigator.share({ files: [shareableFile(file, zipName)], title: zipName, text: '存储到文件后解压，即还原目录结构' })
@@ -842,6 +978,15 @@ export default function Home() {
     setExportMsg('正在准备分享…')
     try {
       const names = shareNames(selectedItems)
+      if (IS_NATIVE) {
+        const files: NativeShareFile[] = []
+        for (const it of selectedItems) {
+          files.push({ file: await mergedFileOf(it), name: names.get(it)! })
+        }
+        await shareFilesNative(files, '选中文件', '存储到文件（多个文件收进一个文件夹，子目录拍平）')
+        setExportMsg(`已批量分享 ${selectedItems.length} 个文件（分享面板选「存储到文件」）`)
+        return
+      }
       const files: File[] = []
       for (const it of selectedItems) {
         const shareName = names.get(it)!
@@ -1107,11 +1252,16 @@ export default function Home() {
                     </span>
                     <button onClick={toggleSelectAll}>{allDoneSelected ? '取消全选' : '全选'}</button>
                     <button onClick={() => setSelectedIds(new Set())}>清空</button>
-                    {HAS_FSA_PICKER && (
+                    {IS_NATIVE && (
+                      <button onClick={() => void exportToNativeFolder(selectedItems, disambiguateRootVsDir(selectedItems))}>
+                        导出选中到文件夹…
+                      </button>
+                    )}
+                    {HAS_FSA_PICKER && !IS_NATIVE && (
                       <button onClick={() => void exportSelectedToDir()}>导出选中到文件夹…</button>
                     )}
                     <button onClick={() => void exportSelectedZip()}>导出选中 zip</button>
-                    {CAN_SHARE_FILES && !HAS_FSA_PICKER && (
+                    {(IS_NATIVE || (CAN_SHARE_FILES && !HAS_FSA_PICKER)) && (
                       <button onClick={() => void exportSelectedShare()}>批量分享选中</button>
                     )}
                   </div>
@@ -1129,13 +1279,19 @@ export default function Home() {
                           </span>
                           {g.items.every((it) => it.status === 'done') ? (
                             <div className="row" style={{ flexWrap: 'wrap', rowGap: 4 }}>
+                              {IS_NATIVE && (
+                                <button onClick={() => void exportToNativeFolder(g.items, uniqueZipPaths(g.items))}>
+                                  导出到文件夹…
+                                </button>
+                              )}
                               <button onClick={() => void exportFolderZip(g)}>导出 zip</button>
-                              {HAS_FSA_PICKER && (
-                                <button onClick={() => void exportFolderToDir(g)}>导出到文件夹…</button>
-                              )}
-                              {CAN_SHARE_FILES && !HAS_FSA_PICKER && (
+                              {IS_NATIVE ? (
                                 <button onClick={() => void exportFolderShare(g)}>批量分享</button>
-                              )}
+                              ) : HAS_FSA_PICKER ? (
+                                <button onClick={() => void exportFolderToDir(g)}>导出到文件夹…</button>
+                              ) : CAN_SHARE_FILES ? (
+                                <button onClick={() => void exportFolderShare(g)}>批量分享</button>
+                              ) : null}
                             </div>
                           ) : (
                             <span className="mono">
@@ -1169,7 +1325,12 @@ export default function Home() {
                         )}
                         {it.status === 'done' ? (
                           <div className="row">
-                            <button onClick={() => void exportFile(it, 'share')}>导出（分享）</button>
+                            {IS_NATIVE && (
+                              <button onClick={() => void exportToNativeFolder([it], new Map([[it, it.name]]))}>
+                                导出到文件夹…
+                              </button>
+                            )}
+                            <button onClick={() => void exportFile(it, 'share')}>{IS_NATIVE ? '分享' : '导出（分享）'}</button>
                             <button onClick={() => void exportFile(it, 'download')}>下载到本机</button>
                           </div>
                         ) : (
@@ -1189,6 +1350,41 @@ export default function Home() {
               </>
             )}
             {exportMsg && <p>{exportMsg}</p>}
+            {nativeExport.phase === 'picking' && <p>选择目标文件夹…</p>}
+            {nativeExport.phase === 'copying' && (
+              <div style={{ margin: '8px 0' }}>
+                <p>
+                  正在导出到「{nativeExport.folderName}」：{nativeExport.doneFiles}/{nativeExport.totalFiles} 个文件完成
+                  {nativeExport.currentName && (
+                    <>
+                      {' '}· 当前：{basename(nativeExport.currentName)}
+                      {nativeExport.currentTotal != null
+                        ? `（${formatBytes(nativeExport.currentWritten ?? 0)} / ${formatBytes(nativeExport.currentTotal)}）`
+                        : ''}
+                    </>
+                  )}
+                </p>
+                {nativeExport.currentTotal != null && nativeExport.currentTotal > 0 && (
+                  <div className="progress">
+                    <div
+                      style={{ width: `${((nativeExport.currentWritten ?? 0) / nativeExport.currentTotal) * 100}%` }}
+                    />
+                  </div>
+                )}
+                <button onClick={cancelNativeExport}>取消（已写文件保留）</button>
+              </div>
+            )}
+            {(nativeExport.phase === 'done' ||
+              nativeExport.phase === 'cancelled' ||
+              nativeExport.phase === 'error') && (
+              <p>
+                {nativeExport.phase === 'done'
+                  ? `已导出 ${nativeExport.doneFiles} 个文件到「${nativeExport.folderName ?? ''}」（目录结构保留，无需解压）`
+                  : nativeExport.phase === 'cancelled'
+                    ? `已取消：已写入 ${nativeExport.doneFiles} 个文件（当前文件已停止，已写保留）`
+                    : nativeExport.message}
+              </p>
+            )}
             <p className="muted">
               [T06 续传] 中断后可续传；[T07 离线二维码] 无网配对；[T08 常亮] 传输中保持屏幕常亮。
             </p>

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { clearAllData, cleanupOrphans, ORPHAN_AGE_MS } from '../storage/cleanup'
 import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '../storage'
 import type { OrphanReport } from '../storage'
+import { IS_NATIVE } from '../native/env'
 import { clearLastRoom, getLastRoom } from '../rooms/session'
 
 const DEVICE_NAME_KEY = 'lt.deviceName'
@@ -228,6 +229,11 @@ export default function Settings() {
         <p className="bad">
           ⚠ iOS 分区隔离：各浏览器/独立 PWA 的存储互不可见——传输与清理必须在同一浏览器/模式。
         </p>
+        {IS_NATIVE && (
+          <p className="bad">
+            ⚠ app 与网页版数据不互通（ADR-0008）：网页版（Safari/PWA）已收文件不会出现在本 app，需要时请重新接收；本 app 的导出与清理都只作用于 app 自己的存储分区。
+          </p>
+        )}
       </section>
 
       <section className="card">

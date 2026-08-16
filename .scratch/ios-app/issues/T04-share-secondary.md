@@ -1,6 +1,17 @@
 # T04: 分享降级为次级按钮(@capacitor/share)
 
-**状态:** ready-for-agent
+**状态:** ✅ 代码完成（2026-08-16）；壳内分享面板真机项随 T05
+
+**完成记录:**
+- 壳内（IS_NATIVE）分享全部切 @capacitor/share：`src/native/share.ts`（writeTemp 落临时文件 → Share.share，iOS files 参数需 file:// URL）；失败有降级提示（message 报错）
+- 「下载到本机」壳内 = 分享面板选「存储到文件」（WKWebView 无可靠 a.download）
+- UI 层级：单文件 / 目录组 / 多选勾选，app 内「导出到文件夹…」为主、分享为次级按钮
+- 桌面/web：navigator.share / FSA 路径零改动（IS_NATIVE 门控）
+
+**验收对照:**
+- [x] 壳内分享面板（单文件/批量走 shareFilesNative）；失败降级提示
+- [x] app 内主/次级按钮层级正确
+- [x] 桌面/web 零改动；`npm test`/build/lint 全绿
 
 **阻塞:** T01
 

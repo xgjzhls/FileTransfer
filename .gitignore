@@ -29,6 +29,16 @@ dist-ssr
 *.sw?
 server/.wrangler/
 
+# ADR-0008 iOS 壳
+# xcodebuild 产物（scripts/ios-deploy.sh 的 DerivedData）
+build/
+
+# 本地插件 Xcode/SPM 元数据（xcodebuild 解析 SPM 时生成，勿入库）
+plugins/folder-export/.swiftpm/
+
+# 用完即弃的原型（完整源码在分支 prototype/ios-app-spike，勿进 main）
+spike/
+
 # pi agent 会话产物（审查 transcript / mission）
 .pi/
 

@@ -1,0 +1,1 @@
+var e=e=>()=>Promise.reject(Error(`FolderExport.${e} 仅 iOS app 内可用（ADR-0008）`)),t={pickFolder:e(`pickFolder`),mkdir:e(`mkdir`),writeChunk:e(`writeChunk`),abort:e(`abort`),writeTemp:e(`writeTemp`)};export{t as webFolderExport};
