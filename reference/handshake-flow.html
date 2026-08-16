@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>建连全流程速查 · LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>建连全流程速查</h1>
+<p class="subtitle">7 课内容的压缩版 —— 一次传输从点击到落地的完整链路。打印贴墙用。</p>
+
+<h2>一次传输的完整链路（点击发送 → 文件落地）</h2>
+
+<pre><code>① 信令（L1）  WS 房间 / QR 码 ← 交换 SDP offer/answer（必须双向 → 离线两跳）
+                  ↓
+② SDP（L2）   m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+              a=ice-ufrag/pwd（打洞凭据）· a=fingerprint/setup（DTLS）
+              a=sctp-port · a=max-message-size:262144（=你的 256KiB−64 帧来源）
+              a=candidate … typ host（局域网只有 host）
+                  ↓
+③ NAT（L3）   内网可出、入站默认丢 → P2P 需要「可被找到」
+              四分类：全锥/限制锥/端口限制锥/对称（映射 × 过滤）
+              对称 NAT = 每目的地一个映射 → STUN 失效
+              映射会过期（有的 20s）→ keepalive / consent freshness
+                  ↓
+④ ICE（L4）   收集(host/srflx/relay/prflx) → 交换 → 配对 → 连通性检查 → 提名
+              检查 = 从 base 发 STUN Binding Request（探路 + 打洞同时完成）
+              控制方(发起方)提名 USE-CANDIDATE；被控方确认
+              优先级：host > srflx > prflx > relay(0)
+                  ↓
+⑤ 打洞（L5）  会合服务器互换公/私端点 → 双方同时向对方公网发包
+              各自的 NAT 把「入站」当成「出站回包」→ 洞开 → 直连
+              对称 NAT 失败；prflx 可能救场；洞会关，需保活
+                  ↓
+⑥ TURN（L6）  打洞失败的最后手段：Allocate 中继地址（10min 寿命需 Refresh）
+              Permission 按对端 IP 授权（防匿名中继）· Channel 降低开销
+              代价 = 服务器替两端承担全部带宽 → relay 优先级 0
+              客户端↔服务器可走 UDP/TCP/TLS；服务器↔对端恒 UDP
+                  ↓
+⑦ 数据面（L7）DTLS 加密 → SCTP（有序/可靠、分片、拥塞控制）→ DCEP 建通道
+              Channel Type 0x00 = 可靠有序（你的 ordered:true）
+              PPID：50=DCEP / 53=二进制帧 / 51=字符串
+              背压：bufferedAmount &gt; 8MiB 暂停，bufferedamountlow 唤醒
+              → 你的 256KiB 帧 → 64MiB bitfield 续传 → OPFS 落盘</code></pre>
+
+<h2>关键对照表</h2>
+
+<table>
+<thead><tr><th>术语</th><th>一句话</th><th>来源</th></tr></thead>
+<tbody>
+<tr><td class="term">信令面 / 数据面</td><td>「商量怎么连」与「真的连」是两个独立平面；载体可任意</td><td>L1 / MDN</td></tr>
+<tr><td class="term">SDP offer/answer</td><td>answer 依赖 offer 生成 → 协商必须双向</td><td>L1–L2</td></tr>
+<tr><td class="term">m= 行</td><td>m=&lt;类型&gt; &lt;端口&gt; &lt;协议栈&gt; &lt;用途&gt;；数据通道 = UDP/DTLS/SCTP webrtc-datachannel</td><td>L2 / RFC 8841</td></tr>
+<tr><td class="term">max-message-size</td><td>单条 SCTP 消息上限；缺省 64K，浏览器协商 262144</td><td>L2 / RFC 8841</td></tr>
+<tr><td class="term">对称 NAT</td><td>每目的地一个新映射；打洞与 STUN 都失效</td><td>L3 / RFC 3489</td></tr>
+<tr><td class="term">host / srflx / relay / prflx</td><td>网卡 / STUN 映射 / TURN 中继 / 检查中意外发现</td><td>L4 / RFC 8445</td></tr>
+<tr><td class="term">连通性检查</td><td>STUN Binding Request 从 base 发往对端候选；探路+打洞+验凭据</td><td>L4–L5</td></tr>
+<tr><td class="term">TURN Allocation</td><td>中继地址，10min 寿命，Permission 按 IP 授权</td><td>L6 / RFC 5766</td></tr>
+<tr><td class="term">DCEP Channel Type</td><td>0x00 可靠有序；0x80 位 = unordered；部分可靠 = 限次数/限时间</td><td>L7 / RFC 8832</td></tr>
+<tr><td class="term">背压</td><td>bufferedAmount 超阈值暂停，低于阈值唤醒；你的 8MiB / 4MiB</td><td>L7 / sender.ts</td></tr>
+</tbody>
+</table>
+
+<h2>你的项目当前所处位置</h2>
+<ul>
+  <li>信令：WS + QR 双载体，单协议 <code>SignalPayload { kind: 'offer'|'answer', sdp }</code>（L1）</li>
+  <li>非 trickle 单次装载：等 gathering complete 后 gzip+b64 一次发出（L2）</li>
+  <li><code>iceServers: []</code> → 仅 host 候选；局域网直达，无需 NAT 穿越（L3–L4）</li>
+  <li>跨网最小改动：加 STUN（srflx）→ 不够再加 TURN（relay）；同栈自动处理（L4/L6）</li>
+  <li>数据面：256KiB−64 帧 + 8MiB 背压 + 64MiB bitfield 续传（L7）</li>
+</ul>
+
+<footer>
+<a href="../lessons/0007-datachannel-data-plane.html">← 第 7 课</a> · <a href="../reference/glossary.html">词汇表</a> · LocalTransfer 教学课程 · 建连全流程速查 v1
+</footer>
+
+</body>
+</html>

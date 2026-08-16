@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 6 课 · TURN 中继 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>TURN：最后手段与它的成本</h1>
+<p class="subtitle">第 6 课 · 打洞失败时的兜底。数据绕道服务器，保证几乎总能连上——但每一字节都要付带宽钱。本课回答：TURN 怎么工作、为什么是最后手段、部署时要防什么。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能说出 TURN 的三个核心机制（Allocate / Permission / Channel），解释「为什么 TURN 必须只做兜底」，以及你未来部署时要防的三种坑。</div>
+
+<h2>什么时候需要 TURN</h2>
+
+<p>第 3、5 课已经给了答案：对称 NAT、防火墙禁 UDP、运营商级 NAT 没有 hairpin……这些场景下打洞和 STUN 都失效。<a href="https://www.rfc-editor.org/rfc/rfc5766.txt">RFC 5766</a>（TURN）引言直接说了打洞的边界：</p>
+
+<blockquote>
+  <p>If both hosts are behind NATs that have a mapping behavior of <strong>address-dependent mapping</strong> or <strong>address- and port-dependent mapping</strong>, then hole punching techniques generally fail. … it is <strong>best to use a TURN server only when a direct communication path cannot be found</strong>.</p>
+  <span class="src">—— <a href="https://www.rfc-editor.org/rfc/rfc5766.txt">RFC 5766</a> §1 Introduction</span>
+</blockquote>
+
+<p>ICE 天然遵守这个次序：候选优先级里 relay 通常为 0（最后手段）——host、srflx 全试过都不通，才轮到 TURN（第 4 课）。</p>
+
+<h2>TURN 的三个核心机制</h2>
+
+<h3>1. Allocation（分配）</h3>
+<p>客户端向 TURN 服务器发 <code>Allocate</code> 请求，服务器在公网分配一个 <strong>relayed transport address</strong>（中继传输地址）——这就是你的 relay 候选者。流程（RFC 5766 §2.2）：</p>
+<pre><code>Client ──Allocate(无凭据)──▶ Server
+Client ◀──401 Unauthorized── Server      ← 先要认证
+Client ──Allocate(带凭据)──▶ Server
+Client ◀──relayed addr───── Server      ← 分配成功，得到中继地址</code></pre>
+<p>分配的默认寿命 <strong>10 分钟</strong>，之后必须周期性发 <code>Refresh</code> 续命（否则资源被回收）。一个分配可以同时与<b>多个对端</b>通信——数据包总是标明「发给哪个对端」，这比 SOCKS（一次一个）更适合 ICE。</p>
+
+<h3>2. Permission（权限）</h3>
+<p>为了防止 TURN 被利用成「匿名转发器」绕过企业防火墙，服务器默认<b>拒绝一切入站中继数据</b>。客户端必须显式为每个对端 IP 建立 <strong>permission</strong>（权限，默认寿命 5 分钟）。来自未授权地址的包被静默丢弃（RFC 5766 §2.3，模仿 NAT 的地址受限过滤）。</p>
+
+<h3>3. Channel（通道）</h3>
+<p>数据传输有两种封装：每次发 <code>Send/Data indication</code>（带完整的对端地址，开销大）或先 <code>ChannelBind</code> 绑定一个 16 位通道号，之后用 <code>ChannelData</code> 消息传（头小得多）。高频大流量走通道，省 20 字节左右/包。</p>
+
+<h2>成本：为什么只能当兜底</h2>
+
+<div class="key-insight">
+  <span class="label">关键洞见</span>
+  <p>中继 = <b>服务器替两端承担全部带宽</b>。RFC 5766 引言说得很直白：<em>「the use of a TURN server … comes at a high cost to the provider … since the server typically needs a high-bandwidth connection」</em>。你的 10GB 文件如果走 TURN，服务器要接收 10GB 再转出 10GB——20GB 的出口带宽，全是你的账单。这就是「relay 优先级为 0」的经济学理由。</p>
+</div>
+
+<p>另外两个工程事实（RFC 5766 §2.1）：</p>
+<ul>
+  <li><strong>客户端→服务器</strong>可走 UDP / TCP / <strong>TLS-over-TCP</strong>；<strong>服务器→对端永远是 UDP</strong>。某些防火墙完全封 UDP 时，TURN over TCP（甚至 443 端口）是唯一活路——这是 getstream 调试清单里「客户站点封 UDP 需要 443 中继」的出处。</li>
+  <li>TURN 分配成功时会顺便告诉你「我看到的你的公网地址」——<strong>一个 TURN 服务器同时覆盖了 STUN 的活</strong>，生产部署可以只配 TURN。</li>
+</ul>
+
+<h2>部署时要防的坑</h2>
+<p>getstream 文章给出了一份 coturn 配置的心得（<a href="https://getstream.io/blog/what-is-ice-protocol/">原文</a>）：</p>
+<ul>
+  <li><strong>防开放中继</strong>：必须认证（<code>use-auth-secret</code> 临时凭据），否则任何人都能借你的带宽转发流量（匿名中继攻击，RFC 5766 §17.3.2）。</li>
+  <li><strong>防内网穿透</strong>：<code>denied-peer-ip</code> 屏蔽私网段（10/8、172.16/12、192.168/16），防止有人借 TURN 打进你的内网（RFC 5766 §17.2.2）。</li>
+  <li><strong>配额</strong>：<code>user-quota</code> / <code>total-quota</code> 限制并发分配，防 DoS（RFC 5766 §17.3.1）。</li>
+</ul>
+
+<h2>对号入座：你的 LocalTransfer</h2>
+<p>当前 <code>iceServers: []</code>，完全不需要 TURN——局域网内 host 候选直达。未来跨网时，你会先加 STUN（覆盖大多数家庭 NAT），只有 STUN 不够的流量才掉到 TURN。一个实用的容量指标：getstream 建议在生产埋点里统计 <strong>relay 占比</strong>（选中的候选对是 relay 的比例）——那是你 TURN 带宽预算的预测器。</p>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. TURN 的 Allocate 分配给你的是什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。服务器在公网分配的中继传输地址——对端往它发包，服务器转给你。">中继传输地址</li>
+    <li data-feedback="不对。那是 srflx（STUN 的公网映射）；TURN 分配的是服务器上独立的中继地址。">公网映射地址</li>
+    <li data-feedback="不对。内网主机地址是你的 host 候选，与 TURN 无关。">内网主机地址</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 为什么 TURN 只能是最后手段？</p>
+  <ol class="options">
+    <li data-feedback="正确。每一字节都进出服务器，带宽成本全由服务方承担——所以 ICE 把 relay 优先级设为 0。">所有数据都流经服务器</li>
+    <li data-feedback="不对。TURN 中转的是数据面；信令面在 ICE 里走的是另一条通道。">服务器只中转信令消息</li>
+    <li data-feedback="不对。加密是 DTLS 的职责（端到端），TURN 服务器不负责加解密数据。">服务器会加密全部数据</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. TURN 的 permission（权限）起什么作用？</p>
+  <ol class="options">
+    <li data-feedback="正确。默认拒绝一切入站中继，只有显式授权过的对端 IP 才能发数据进来——防止 TURN 变匿名转发器。">只允许授权的对端发包</li>
+    <li data-feedback="不对。那样 TURN 就门户大开，等于放弃了防滥用机制。">允许所有公网地址发包</li>
+    <li data-feedback="不对。完全禁止就失去中继意义了；权限是按对端 IP 逐个授权的。">禁止所有对端地址发包</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. 分配（allocation）建立后需要定期做什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。默认寿命 10 分钟，必须周期性 Refresh，否则中继地址被回收。">发送刷新请求维持寿命</li>
+    <li data-feedback="不对。SDP 协商发生在建连阶段；中继地址由 TURN 管理，不靠重协商维持。">重新协商会话描述内容</li>
+    <li data-feedback="不对。ICE 候选收集是建连阶段的事，与分配保活无关。">重新执行候选收集流程</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.rfc-editor.org/rfc/rfc5766.txt">RFC 5766</a> 第 2 节（Overview of Operation，15 分钟）——Allocate、Permission、Channel 三节的图示非常清楚。再看 <a href="https://getstream.io/blog/what-is-ice-protocol/">getstream 的 ICE 文章</a> 里「STUN vs TURN」对比表与 coturn 配置段（工程实践视角）。</p>
+
+<h2>下一课（最后一课）</h2>
+<p><strong>第 7 课：DataChannel 数据面</strong> —— 连接建好后，你的文件字节怎么在 SCTP 上流动：ordered/reliable 语义、分块与消息上限、以及你已经在用的背压机制（对照 <code>src/transfer/sender.ts</code>）。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它可以带你算一笔 TURN 带宽账，或解释 coturn 配置项。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../lessons/0005-udp-hole-punching.html">← 第 5 课</a> · <a href="../RESOURCES.md">资源清单</a> · 第 6 课 / 共 7 课</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

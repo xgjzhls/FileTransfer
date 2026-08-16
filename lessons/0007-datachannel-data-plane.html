@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 7 课 · DataChannel 数据面 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>DataChannel 数据面：你的字节怎么流过去</h1>
+<p class="subtitle">第 7 课 · 收尾课。连接建好后，文件字节在 SCTP 上的完整旅程：ordered/reliable 语义、分块与消息上限、背压 —— 全程对照 <code>src/transfer/sender.ts</code> 和 SPEC §3.1。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能讲清 DataChannel 的可靠性语义从哪来、为什么必须分块、你的 8MiB 背压阈值在防什么——并把 7 课知识串成一条完整的「点击发送 → 文件落地」链路。</div>
+
+<h2>你的字节站在哪一层</h2>
+
+<p>第 2 课的协议栈练习已经埋好答案，现在补全细节（<a href="https://www.rfc-editor.org/rfc/rfc8831.txt">RFC 8831</a> §5）：</p>
+
+<pre><code>┌─────────────────────────────┐
+│ 你的应用帧（framing.ts）      │  ← 文件 id / part / chunk / 校验
+├─────────────────────────────┤
+│ DataChannel + DCEP          │  ← 通道语义（ordered/reliable）在此协商
+├─────────────────────────────┤
+│ SCTP（RFC 4960 + PR-SCTP）   │  ← 有序性、可靠性、分片重组、拥塞控制
+├─────────────────────────────┤
+│ DTLS                        │  ← 加密、完整性、源认证
+├─────────────────────────────┤
+│ ICE/UDP（RFC 8445）          │  ← NAT 穿越（第 3–6 课全部内容）
+└─────────────────────────────┘</code></pre>
+
+<p>SCTP 是这份栈的引擎：<strong>多流、有序/乱序投递、可靠/部分可靠、任意大消息的分片重组、PMTU 发现、拥塞控制</strong>全部由它提供（RFC 8831 §5）。DataChannel 只是它上面一层薄薄的映射。</p>
+
+<h2>ordered / reliable 到底指什么</h2>
+
+<p>RFC 8831 明确了两个正交的维度，且都是<b>消息级</b>属性（不是通道级）：</p>
+<table>
+<thead><tr><th>维度</th><th>含义</th><th>实现机制</th></tr></thead>
+<tbody>
+<tr><td class="term">有序<br><span class="en">ordered</span></td><td>按发送顺序投递</td><td>SCTP 流内序号（SSN），有序消息按序上抛</td></tr>
+<tr><td class="term">可靠<br><span class="en">reliable</span></td><td>丢包必重传</td><td>SCTP 确认与重传（T3 计时器）</td></tr>
+<tr><td class="term">部分可靠<br><span class="en">partial reliable</span></td><td>可限制重传次数 / 存活时间</td><td>PR-SCTP（RFC 3758）+ 受限重传策略（RFC 7496）</td></tr>
+</tbody>
+</table>
+
+<p>DCEP 的 <code>DATA_CHANNEL_OPEN</code> 消息（<a href="https://www.rfc-editor.org/rfc/rfc8832.txt">RFC 8832</a> §5.1）用一个字节的 <strong>Channel Type</strong> 字段把组合编码出来——第 2 课「ordered 不进 SDP」的完整兑现：</p>
+<pre><code>Channel Type（1 字节）:
+  0x00  DATA_CHANNEL_RELIABLE                 可靠 + 有序
+  0x80  DATA_CHANNEL_RELIABLE_UNORDERED       可靠 + 乱序（最高位=unordered 标志）
+  0x01  DATA_CHANNEL_PARTIAL_RELIABLE_REXMIT  部分可靠（限重传次数）+ 有序
+  0x81  同上 + 乱序
+  0x02  DATA_CHANNEL_PARTIAL_RELIABLE_TIMED   部分可靠（限存活毫秒）+ 有序
+  0x82  同上 + 乱序
+
+后续字段: Priority(2B) + Reliability Parameter(4B, 次数或毫秒) + Label/Protocol</code></pre>
+
+<p>你的 <code>createDataChannel('lt', { ordered: true })</code> → 通道类型 <code>0x00</code>（可靠有序）。对文件传输这是正确选择：字节错序/丢失会让整个文件损坏。RFC 8831 用例表里「non-real-time file transfers」（U-C 4）正是这种通道的标准用例。</p>
+
+<div class="key-insight">
+  <span class="label">关键洞见</span>
+  <p>为什么 DataChannel 能「重传」——而它的底层 UDP 不能？因为 <b>SCTP 在自己的层实现了可靠传输</b>（确认 + 重传 + 流控），就像 TCP 之于 IP。DataChannel = 跑在 UDP 上的「类 TCP」服务，外加多流与消息边界。这是整个数据面语义的来源。</p>
+</div>
+
+<h2>为什么必须分块：三个原因</h2>
+<ol>
+  <li><strong>消息上限</strong>：单条 SCTP 用户消息不能超过对方声明的 <code>max-message-size</code>（第 2 课：缺省 64K、浏览器协商 256KiB）。你的 <code>CHUNK_SIZE = 256*1024 - 64</code> 正好卡在上限内，64 字节留给帧头。</li>
+  <li><strong>避免独占关联</strong>：没有消息交错（RFC 8260）时，一个大消息会垄断 SCTP 关联——RFC 8831 建议此时上限 16KB。现代浏览器支持交错，所以 256KiB 可用；但你的 <code>dc.send()</code> 每次一帧，天然不独占。</li>
+  <li><strong>断点续传</strong>：分块让 64MiB bitfield 粒度（ADR-0005）成为可能——崩溃后只重传缺失块，不重发整个文件。</li>
+</ol>
+
+<p>每条 SCTP 用户消息还携带 <strong>PPID</strong>（Payload Protocol Identifier）标明类型：<code>50</code>=DCEP、<code>51</code>=字符串、<code>53</code>=二进制（你的文件帧）、<code>56/57</code>=空消息。接收端靠它区分「控制消息」和「用户数据」。</p>
+
+<h2>背压：你已经在做的流控</h2>
+
+<p>发送太快会怎样？<code>dc.send()</code> 把帧放进 SCTP 发送缓冲区（浏览器实现），你只管调 API——如果对方接收慢或链路拥塞，缓冲区会无限涨，内存被吃掉。防这个的机制是 <strong>背压</strong>：先看积压，再决定是否继续发。</p>
+
+<p>你的 <code>src/transfer/sender.ts</code> 是教科书实现：</p>
+
+<pre><code>export const BACKPRESSURE_LIMIT = 8 * 1024 * 1024   // SPEC §3.1: >8MiB 暂停
+
+private async pump(frame: Uint8Array): Promise&lt;void&gt; {
+  this.transport.send(frame)
+  while (this.transport.bufferedAmount &gt; BACKPRESSURE_LIMIT) {
+    await waitForLow(this.transport)   // bufferedamountlow 事件唤醒
+  }
+}</code></pre>
+
+<p>机制对照（<a href="https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel/bufferedAmount">MDN</a>）：</p>
+<ul>
+  <li><code>bufferedAmount</code> = 「已排队但尚未发出」的字节数（MDN 原文：<em>the number of bytes of data currently queued to be sent … but have not yet been sent</em>）。</li>
+  <li>你每发一帧就检查：超过 <strong>8MiB</strong> 暂停；浏览器在积压降到 <code>bufferedAmountLowThreshold</code>（<code>peer.ts</code> 里设成阈值一半 = 4MiB）时触发 <code>bufferedamountlow</code> 事件唤醒发送循环。</li>
+  <li>结果：<b>在途数据始终 ≤ 8MiB</b>，内存有界；发送速率自动贴合接收方处理能力——这就是「窗口式流控」在浏览器层的实现。</li>
+</ul>
+
+<p>为什么是 8MiB？太小→吞吐受往返延迟限制（发送方经常空等）；太大→崩溃时丢的数据多（8MiB 在途 × 重传成本）。你的选择是吞吐与风险的折中——也正好是「传输帧 256KiB、bitfield 粒度 64MiB」粒度体系里的一环。</p>
+
+<h2>关闭通道与 SCTP 流重置</h2>
+<p>DataChannel 关闭不是「发一条再见」：关闭方重置对应的 SCTP 流（RFC 6525），对端看到流被重置后也重置自己的出站流，双方完成后通道才真正关闭——重置保证「已发消息要么送达要么放弃」之后才释放流（RFC 8831 §6.7）。你的 <code>RtcPeer.close()</code> 调 <code>dc.close()</code> 时，浏览器在幕后做的就是这件事。</p>
+
+<h2>收尾：把 7 课串成一条链路</h2>
+<p>现在你能完整讲出「点击发送 → 文件落地」的每一层了：</p>
+<ol>
+  <li><strong>信令</strong>（第 1 课）：WS/QR 双载体交换 SDP offer/answer——为什么必须双向、为什么离线两跳。</li>
+  <li><strong>SDP</strong>（第 2 课）：<code>m=application … UDP/DTLS/SCTP webrtc-datachannel</code> + ICE 凭据 + <code>max-message-size</code>。</li>
+  <li><strong>NAT</strong>（第 3 课）：为什么跨网需要穿透；局域网 host 候选直达。</li>
+  <li><strong>ICE</strong>（第 4 课）：收集→交换→连通性检查→提名；你的栈只有 host。</li>
+  <li><strong>打洞</strong>（第 5 课）：检查即打洞；对称 NAT 失败、prflx 救场。</li>
+  <li><strong>TURN</strong>（第 6 课）：打洞失败的兜底与成本。</li>
+  <li><strong>数据面</strong>（本课）：DTLS 加密 → SCTP 有序可靠投递 → DCEP 建通道 → 你的 256KiB 帧 → 8MiB 背压 → OPFS 落盘。</li>
+</ol>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. createDataChannel 的 ordered 参数在 DCEP 里怎么传递？</p>
+  <ol class="options">
+    <li data-feedback="正确。DATA_CHANNEL_OPEN 的 Channel Type 字节：最高位 0x80 = unordered 标志，0x00/0x01/0x02 为有序。">写在通道类型字节的最高位</li>
+    <li data-feedback="不对。第 2 课已证：通道参数走 DCEP 带内协商，不进 SDP（除非用 dcmap 的非浏览器路径）。">写在会话描述的媒体属性行</li>
+    <li data-feedback="不对。ICE 候选者只描述传输路径（地址/协议），不承载通道语义。">写在候选者网络地址字段内</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 部分可靠（partial reliable）通道可以怎么约束？</p>
+  <ol class="options">
+    <li data-feedback="正确。PR-SCTP 的两种策略：限制重传次数（REXMIT）或限制存活毫秒（TIMED），写入 Reliability Parameter。">限制重传次数或存活时间</li>
+    <li data-feedback="不对。通道数量与消息大小不由可靠性语义决定；消息大小上限是 max-message-size 的职责。">限制通道数量或消息大小</li>
+    <li data-feedback="不对。连接时长是 SCTP 关联的事，加密强度是 DTLS 的事，都与部分可靠无关。">限制连接时长或加密强度</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. 你的背压机制靠什么判断要不要暂停发送？</p>
+  <ol class="options">
+    <li data-feedback="正确。sender.pump 每帧检查 bufferedAmount（排队未发字节数），超 8MiB 暂停，bufferedamountlow 唤醒。">检查待发送的字节数暂停发送</li>
+    <li data-feedback="不对。连接状态在 peer.ts 管（failed 才重建），不是背压的判断依据。">检查连接状态失败后重连通道</li>
+    <li data-feedback="不对。存储配额是接收端 OPFS 的事；背压管的是发送端在途数据量。">检查磁盘配额不足则清理空间</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. 每条 SCTP 用户消息携带的 PPID 有什么作用？</p>
+  <ol class="options">
+    <li data-feedback="正确。PPID 标明消息类型：50=DCEP 控制、51=字符串、53=二进制（你的文件帧）——接收端靠它分流。">每条消息携带类型标识字段</li>
+    <li data-feedback="不对。流的序号（SSN）才负责有序投递；PPID 不是序号。">每条消息带通道号标明序号</li>
+    <li data-feedback="不对。端口在 SCTP 关联层（两端各一），与单条消息的类型无关。">每条消息带端口号标明流向</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.rfc-editor.org/rfc/rfc8831.txt">RFC 8831</a> 第 5 节（SCTP over DTLS over UDP，10 分钟）和第 6.4–6.6 节（通道定义与数据传输），再扫一眼 <a href="https://www.rfc-editor.org/rfc/rfc8832.txt">RFC 8832</a> 的 DATA_CHANNEL_OPEN 格式图（5 分钟）。这两个文档就是你整门课数据面的权威出处。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——7 课的内容它都可以展开；也可以让它对照 SPEC.md 逐条解释你的传输协议设计。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../reference/handshake-flow.html">建连全流程速查</a> · <a href="../lessons/0006-turn-relay-last-resort.html">← 第 6 课</a> · 第 7 课 / 共 7 课 ✅</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

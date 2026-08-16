@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 3 课 · NAT —— 为什么「直接连接」不直接 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>NAT：为什么互联网上的「直接连接」不直接</h1>
+<p class="subtitle">第 3 课 · P2P 最硬核的部分 —— 你点名的盲区。本课回答：为什么两台设备在局域网秒连，搬到互联网就废了。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能解释「为什么你的 app 在局域网不需要 STUN/TURN，而跨网就必须」——并说出 NAT 四种行为的精确区别（全锥 / 限制锥 / 端口限制锥 / 对称）。</div>
+
+<h2>一个你早就知道的现象</h2>
+
+<p>你的 LocalTransfer 在 iPhone ↔ iPad ↔ Mac 之间秒连——因为它们在同一个局域网，设备互相直接可达。但想象把两台设备放到两个不同的家庭 WiFi 后面：A 想给 B 发一个 UDP 包，B 收不到。为什么？</p>
+
+<p>因为中间隔着路由器，而路由器上跑着一个叫 <strong>NAT</strong>（Network Address Translation，<a href="https://www.rfc-editor.org/rfc/rfc2663.html">RFC 2663</a>）的东西。</p>
+
+<h2>为什么会有 NAT</h2>
+
+<p>两个历史原因：</p>
+<ul>
+  <li><strong>IPv4 地址不够分</strong>：全世界只有约 43 亿个 IPv4 地址。解决办法是：内网设备用私网地址（<code>10.x</code> / <code>172.16–31.x</code> / <code>192.168.x</code>，<a href="https://www.rfc-editor.org/rfc/rfc1918.html">RFC 1918</a>），只有路由器占一个公网地址，NAT 负责翻译。</li>
+  <li><strong>默认安全</strong>：NAT 顺带成了防火墙——内网设备可以出去，但外面的人默认进不来。</li>
+</ul>
+
+<h2>NAT 的机制：一张映射表</h2>
+
+<p>NAT 的核心是一张「映射表」：</p>
+
+<pre><code>内网端点 (private)        ↕      公网端点 (public)
+192.168.1.5:54321        ↔      203.0.113.7:62000
+192.168.1.8:32100        ↔      203.0.113.7:62001</code></pre>
+
+<ul>
+  <li><strong>出站</strong>：内网设备发一个包 → NAT 在表里建一条映射（如果还没有）→ 改写源地址为公网端点 → 发出去。</li>
+  <li><strong>入站</strong>：外面来了一个包 → NAT 查表，目的公网端点有映射 → 改写成内网端点转发进去；<strong>没有映射 → 直接丢弃</strong>。</li>
+</ul>
+
+<div class="key-insight">
+  <span class="label">核心矛盾</span>
+  <p>P2P 的本质需求是「别人能找到我」；NAT 的默认策略是「别人找不到我」。整个 NAT 穿越（traversal）领域，都是在跟这个默认策略周旋。</p>
+</div>
+
+<h2>四种 NAT（RFC 3489 §5 的权威分类）</h2>
+
+<p>不同 NAT 的行为不一样。<a href="https://www.rfc-editor.org/rfc/rfc3489.html">RFC 3489</a> 观察到四种行为，用两个维度区分：<strong>映射行为</strong>（同一内网端点对外是固定一个公网端点，还是每目的地一个）和<strong>过滤行为</strong>（谁可以给我发入站包）。</p>
+
+<table>
+<thead><tr><th>类型</th><th>映射</th><th>过滤（谁能进）</th></tr></thead>
+<tbody>
+<tr><td class="term">全锥<br><span class="en">full cone</span></td><td>固定（同一内网端点 → 同一公网端点）</td><td>任意外网主机</td></tr>
+<tr><td class="term">限制锥<br><span class="en">restricted cone</span></td><td>固定</td><td>仅「我曾发过包给它的 IP」</td></tr>
+<tr><td class="term">端口限制锥<br><span class="en">port restricted cone</span></td><td>固定</td><td>仅「我曾发过包给它的 IP:端口」</td></tr>
+<tr><td class="term">对称<br><span class="en">symmetric</span></td><td><b>每目的地一个</b>（同一内网端点发给不同目的地 → 不同公网端点）</td><td>仅收到过我包的对方</td></tr>
+</tbody>
+</table>
+
+<p>RFC 3489 对四种类型的原文定义：</p>
+
+<blockquote>
+  <p><strong>Full cone</strong>: all requests from the same internal IP address and port are mapped to the same external IP address and port. Furthermore, <em>any external host</em> can send a packet to the internal host, by sending a packet to the mapped external address. … <strong>Symmetric</strong>: all requests from the same internal IP address and port, <em>to a specific destination</em> IP address and port, are mapped to the same external IP address and port. If the same host sends a packet … to a different destination, a <em>different mapping</em> is used.</p>
+  <span class="src">—— <a href="https://www.rfc-editor.org/rfc/rfc3489.html">RFC 3489</a> §5 NAT Variations</span>
+</blockquote>
+
+<p>现在能精确回答上一课留下的伏笔了：</p>
+
+<div class="key-insight">
+  <span class="label">关键洞见</span>
+  <p>STUN 能告诉你「我在 NAT 外面的地址」——但这个地址<b>只有在映射行为是「固定」时才对别人有用</b>。对称 NAT 下，STUN 服务器看到的映射是「发给 STUN 服务器」这个目的地专用的；你的对端往那个地址发包，NAT 会开一条<b>新的</b>映射而不是复用旧的，包根本到不了你。RFC 3489 的适用性声明直接说了：<em>「STUN does not enable incoming UDP packets through symmetric NATs」</em>。</p>
+</div>
+
+<h2>映射还会过期</h2>
+
+<p>UDP 没有连接状态，NAT 无法知道会话何时结束，只能靠空闲计时器回收映射。Ford 等人的经典论文测过：<strong>有的 NAT 空闲 20 秒就关洞</strong>。所以 P2P 连接建立后必须周期性地发 <strong>keepalive</strong>，否则洞会消失（<a href="https://www.usenix.org/legacy/event/usenix05/tech/general/full_papers/ford/ford.pdf">Ford, Srisuresh &amp; Kegel, USENIX 2005</a>）。ICE 里对应的是「consent freshness」机制：连接后每隔几秒重探一次，若 30 秒内没有应答，必须停止发送（<a href="https://www.rfc-editor.org/info/rfc7675">RFC 7675</a>）。</p>
+
+<h2>对号入座：你的 LocalTransfer</h2>
+
+<ul>
+  <li><strong>为什么局域网不需要 STUN/TURN</strong>：同一网段内，两台设备的 <code>192.168.x.x</code> 地址互相<b>本来就能直达</b>——没有 NAT 横在中间，host 候选者直接可用。这就是你 <code>iceServers: []</code> 的全部合理性（CONTEXT 约束「v1 无跨网需求」）。</li>
+  <li><strong>为什么「路由器 AP 隔离 / 跨 VLAN」是你列的关键风险</strong>：AP 隔离是路由器主动<strong>过滤</strong>同网段设备间的流量——本质就是「过滤行为」的另一种形态。一旦开启，你的 host 候选者之间的包被丢弃，连接失败。</li>
+  <li><strong>未来跨网怎么做</strong>：加上 STUN → 获得 server-reflexive 候选（<code>typ srflx</code>）；加 TURN → 获得 relayed 候选（<code>typ relay</code>）。这正是第 4 课的内容。</li>
+</ul>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. 外部主机主动发来的入站包，NAT 默认怎么处理？</p>
+  <ol class="options">
+    <li data-feedback="正确。NAT 查映射表：目的公网端点无记录就直接丢弃——这就是「外面进不来」的机制。">无映射记录就丢弃入站</li>
+    <li data-feedback="不对。若无条件转发，NAT 就不构成任何防护，也不会是 P2P 的障碍了。">无条件转发所有入站包</li>
+    <li data-feedback="不对。任意入站包都能触发新映射的话，NAT 等于门户大开，与默认安全策略矛盾。">建立新映射后转发进去</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 为什么对称 NAT 下，STUN 获得的公网地址无法用于直连？</p>
+  <ol class="options">
+    <li data-feedback="正确。对称 NAT 的映射是「每目的地一个」：STUN 看到的映射只对 STUN 服务器有效，对端发包会触发新映射。">因为映射只对单一目的地有效</li>
+    <li data-feedback="不对。映射过期是另一个问题（keepalive 解决），不是对称 NAT 的致命伤。">因为映射随会话一结束就失效</li>
+    <li data-feedback="不对。公网地址本身是稳定的，问题在于映射绑定了目的地，而非地址会更换。">因为所报公网地址会定期更换</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="1">
+  <p class="q">Q3. 「仅联系过的地址能发入站包」描述的是哪种 NAT？</p>
+  <ol class="options">
+    <li data-feedback="不对。这是全锥：任何外网主机都能向映射地址发包，不做任何过滤。">外网任意主机都能发入站包</li>
+    <li data-feedback="正确。这是限制锥（restricted cone）：过滤按「我曾主动联系过的源 IP」判断。">仅联系过的地址能发入站包</li>
+    <li data-feedback="不对。按 IP 段过滤不是标准 NAT 分类维度；同网段判断属于路由/防火墙逻辑。">仅内网相同网段能发入站包</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. 为什么 P2P 连接建立后还要持续发 keepalive？</p>
+  <ol class="options">
+    <li data-feedback="正确。UDP 无连接状态，NAT 靠空闲计时器回收映射（有的短至 20 秒），不发保活洞就关了。">映射会因空闲超时而过期</li>
+    <li data-feedback="不对。协商失败会重建连接，但那是失败路径；正常连接不需要为它保活。">映射会因协商失败而重建</li>
+    <li data-feedback="不对。NAT 不因负载换映射；负载只会影响吞吐，不影响映射存在性。">映射会因负载过高而更换</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.rfc-editor.org/rfc/rfc3489.html">RFC 3489</a> 第 5 节（四种 NAT 的原文定义）—— 5 分钟。再看 <a href="https://www.usenix.org/legacy/event/usenix05/tech/general/full_papers/ford/ford.pdf">Ford et al. 2005（UDP hole punching 经典论文）</a> 的第 3 节（打洞过程与三种网络场景），这是打洞一词的出处，也是第 5 课的预告。</p>
+
+<h2>下一课</h2>
+<p><strong>第 4 课：ICE —— 候选者、连通性检查与「选路」</strong>。既然 NAT 让「你以为的地址」不可达，ICE 的做法是：把所有可能的地址都列出来，逐个试，选出真正能用的那条路。这是你第 2 课看到的 <code>a=candidate</code> 行的完整故事。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它可以用你的路由器场景举例，或画出 NAT 的时序图。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../lessons/0002-sdp-whats-inside.html">← 第 2 课</a> · <a href="../RESOURCES.md">资源清单</a> · 第 3 课 / 共 7 课</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

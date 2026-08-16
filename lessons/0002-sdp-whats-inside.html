@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 2 课 · SDP 里到底写了什么 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>SDP 里到底写了什么</h1>
+<p class="subtitle">第 2 课 · 把二维码里那段 gzip 文本解压出来，逐行读懂 —— 全程对照你自己的代码。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能指着任意一段 SDP 说出每行在干什么，并且明白三个「原来如此」：<code>max-message-size</code> 就是你 256KiB 帧的出处、<code>ordered:true</code> 根本不在 SDP 里、<code>iceServers: []</code> 意味着你的 SDP 里只有 host 候选者。</div>
+
+<h2>起点：你的 SDP 管线</h2>
+
+<p>先看 <code>src/webrtc/peer.ts</code> 里 offer 是怎么诞生的 —— 整条链其实只有 6 行关键代码：</p>
+
+<pre><code>async createOffer(): Promise&lt;string&gt; {
+  const dc = this.pc.createDataChannel('lt', { ordered: true })  // ① 建通道
+  const offer = await this.pc.createOffer()                        // ② 生成 offer
+  await this.pc.setLocalDescription(offer)                         // ③ 设为本地描述
+  await waitForGatheringComplete(this.pc)                          // ④ 等候选收齐
+  return compressSdp(this.pc.localDescription!.sdp)                // ⑤ 压缩后返回
+}</code></pre>
+
+<p>两个值得停下的细节：</p>
+<ul>
+  <li><strong>④ 是非 trickle（一次性）信令</strong>：你的实现必须等 <code>iceGatheringState === 'complete'</code> 才取 <code>localDescription.sdp</code>——否则 SDP 里还没有候选者。对比第 1 课讲的 MDN 流程（一边收集一边发 candidate），你为了配合「扫码只能传一次」的场景，把候选者全部内联进了一份 SDP。这是单载体（QR）对协议的约束，不是偷懒。</li>
+  <li><strong>⑤ 压缩</strong>：看 <code>src/webrtc/sdpCodec.ts</code>，就是 gzip + base64url。SDP 是高度重复的文本，gzip 能压掉 90%+——你的注释里写「候选密集的 offer 可压 90%+」。为什么这么有效，马上就看到。</li>
+</ul>
+
+<h2>SDP 是什么：一行一行的文本</h2>
+
+<p>SDP（Session Description Protocol，<a href="https://datatracker.ietf.org/doc/html/rfc8866">RFC 8866</a>）是纯文本、行式、<code>key=value</code> 的协议。每行一个字段，<code>v=</code>、<code>a=</code>、<code>m=</code> 这种前缀是字段名。结构分两级：</p>
+
+<ul>
+  <li><strong>会话级</strong>（文件开头）：<code>v=</code>、<code>o=</code>、<code>s=</code>、<code>t=</code>，加上作用于整个会话的 <code>a=</code> 属性</li>
+  <li><strong>媒体级</strong>（每个 <code>m=</code> 行开始的一个块）：描述一条媒体流或数据通道，块内的 <code>a=</code> 只作用于它</li>
+</ul>
+
+<p>这就是为什么 gzip 效果拔群：每行都有固定前缀、重复的模板结构，压缩器最爱的输入。</p>
+
+<h2>逐行读你的 offer</h2>
+
+<p>下面这段是一份 <strong>组合示意</strong>：行结构与值形态取自 <a href="https://www.rfc-editor.org/rfc/rfc8841.html">RFC 8841 §13.1</a> 的真实示例 + <a href="https://www.rfc-editor.org/rfc/rfc8445.html">RFC 8445</a> 的 ICE 字段，具体数值是我按你「局域网 + DataChannel + 无 STUN」的场景构造的（你的真机会长得很像）。</p>
+
+<pre><code>v=0                                                  ← 版本，恒为 0
+o=- 4611722893 2 IN IP4 127.0.0.1                    ← 会话发起者标识（id 随机，地址只是占位）
+s=-                                                  ← 会话名，未用
+t=0 0                                                ← 会话起止时间（0 = 不限）
+a=group:BUNDLE 0                                     ← 多路复用组（音视频才关键，浏览器照发）
+a=msid-semantic: WMS                                 ← 媒体流 id 语义，浏览器模板行
+a=ice-ufrag:qR7kLx                                   ← ICE 用户名片段（随机，每端独立）
+a=ice-pwd:9f2YkPzQ4mTnXw                             ← ICE 密码（随机）——打洞/校验凭据
+a=fingerprint:sha-256 5E:2A:9C:...                   ← DTLS 证书指纹（64 个十六进制字节）
+a=setup:actpass                                      ← DTLS 角色：offer 端「我两种都行」
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel     ← ★ 媒体行：应用数据 | 端口占位 | 协议栈 | 用途
+c=IN IP4 0.0.0.0                                     ← 连接地址占位（真正地址在候选者里）
+a=mid:0                                              ← 该媒体的序号（与 BUNDLE 组对应）
+a=sctp-port:5000                                     ← ★ SCTP 端口（数据通道的传输层端口）
+a=max-message-size:262144                            ← ★ 单条消息上限（256KiB）
+a=candidate:1467250027 1 udp 2122260223              ← ICE 候选者 1：优先级 + 协议
+ 192.168.1.5 54111 typ host                          ← 地址 192.168.1.5:54111，类型 = host
+a=candidate:2364151 1 udp 2122194687                 ← ICE 候选者 2：另一个网卡地址
+ 10.0.0.8 54111 typ host</code></pre>
+
+<p>逐块看：</p>
+
+<h3>会话级：v= / o= / s= / t=</h3>
+<p>RFC 8866 的固定开场。对连接本身几乎没用（<code>o=</code> 的 id 用于区分会话版本，重协商时会变）。读到这里可以跳过。</p>
+
+<h3>a=ice-ufrag / a=ice-pwd —— 打洞的「钥匙」</h3>
+<p>这两行是 ICE 凭据（<a href="https://www.rfc-editor.org/rfc/rfc8445.html">RFC 8445</a>）。两台设备要通过 NAT 打洞互相发包时，收到的包必须带着正确的 ufrag/pwd 才被认作「自己人」。每端随机生成自己的，只在 SDP 里交换给对端。第 4 课会展开——现在先知道：<strong>它们让对端能校验「收到的包确实来自协商好的对端」</strong>。</p>
+
+<h3>a=fingerprint / a=setup —— 加密层（DTLS）</h3>
+<p>你的文件字节在传输前会被 <strong>DTLS</strong>（UDP 上的 TLS）加密。<code>a=fingerprint</code> 是本端自签证书的指纹，对端用它验证握手对象没被中间人替换；<code>a=setup:actpass</code> 声明「DTLS 角色我两种都行」，answer 端必须挑一个（active 或 passive），避免两端都等对方先开口（RFC 8841 §9.4）。</p>
+
+<h3>★ m=application 9 UDP/DTLS/SCTP webrtc-datachannel —— 最重要的一行</h3>
+<p>格式是 <code>m=&lt;类型&gt; &lt;端口&gt; &lt;协议&gt; &lt;格式&gt;</code>（RFC 8841 §4）：</p>
+<table>
+<thead><tr><th>字段</th><th>你的值</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td class="term">类型</td><td><code>application</code></td><td>不是音视频，是应用数据</td></tr>
+<tr><td class="term">端口</td><td><code>9</code></td><td>占位符——真实端口由下面 <code>a=candidate</code> 给出</td></tr>
+<tr><td class="term">协议</td><td><code>UDP/DTLS/SCTP</code></td><td><b>整条协议栈</b>：UDP 承载 DTLS，DTLS 承载 SCTP</td></tr>
+<tr><td class="term">格式</td><td><code>webrtc-datachannel</code></td><td>这条 SCTP 关联的用途 = WebRTC 数据通道（RFC 8832/8841 注册名）</td></tr>
+</tbody>
+</table>
+
+<h3>★ a=max-message-size:262144 —— 你 256KiB 帧的出处</h3>
+<p>RFC 8841 §6：SCTP 用户消息（即 DataChannel 上一条 <code>send()</code> 的内容）有大小上限；<strong>缺省是 64K，且绝不能超过对方声明的值</strong>。现代浏览器协商到 262144（256KiB）——MDN 说「most modern browsers support sending messages of at least 256 kilobytes」。你的 SPEC 把它记为硬上限，<code>chunk = 256KiB − 64</code>，那 64 字节是留给帧头的。现在你知道这数字是从哪冒出来的了。</p>
+
+<h3>★ a=candidate … typ host —— 你的地址清单</h3>
+<p>每个候选者 = 「你可以这样找到我」。局域网 + <code>iceServers: []</code> 意味着只有 <strong>host</strong> 类型：网卡上的真实地址（192.168.x.x / 10.x.x.x）。这就是为什么你的两个设备必须同一网段——候选者清单里只有局域网点。第 3/4 课讲 NAT 后你会看到加一个 STUN 会多出 <code>typ srflx</code>（公网映射地址）。</p>
+
+<h2>协议栈全景：你的字节是怎么出去的</h2>
+
+<p>把上面所有 <code>a=</code> 行拼起来，就是一条完整的栈。做个小练习（点选顺序，点错会直接展示答案）：</p>
+
+<div class="order" data-order="FILE,DC,SCTP,DTLS,UDP,NET">
+  <p class="q">你的文件字节从 <code>dc.send(chunk)</code> 出发，依次经过哪些层才到网线？（顶层 → 底层）</p>
+  <div class="pile">
+    <button data-key="SCTP">SCTP（有序/可靠投递）</button>
+    <button data-key="DC">DataChannel（DCEP 建链）</button>
+    <button data-key="UDP">UDP（ICE 打洞传输）</button>
+    <button data-key="FILE">文件字节（你的帧）</button>
+    <button data-key="NET">IP 与网线</button>
+    <button data-key="DTLS">DTLS（加密）</button>
+  </div>
+  <div class="build"></div>
+  <p class="feedback"></p>
+</div>
+
+<div class="key-insight">
+  <span class="label">关键洞见</span>
+  <p>你在 <code>createDataChannel('lt', { ordered: true })</code> 里设的 <code>ordered</code>，<b>根本不会出现在 SDP 里</b>。通道参数（ordered/reliable/label）走的是 <b>DCEP</b>（<a href="https://www.rfc-editor.org/rfc/rfc8832.html">RFC 8832</a>）——SCTP 关联建立后，在<b>带内</b>发一条「打开通道」的控制消息来协商。SDP 只负责「把 SCTP 关联建起来」，通道本身是建好之后的事。</p>
+</div>
+
+<h2>answer 与 offer 的关系</h2>
+
+<p>对照 RFC 8841 §13.1 的真实 offer/answer 对（上节课你已经知道 answer 必须基于 offer 生成），注意三个呼应：</p>
+
+<ul>
+  <li><code>m=</code> 行的 <strong>协议字段必须与 offer 一致</strong>（answer 写 <code>UDP/DTLS/SCTP</code>），但端口各自报各自的</li>
+  <li><code>a=setup</code>：offer 写 <code>actpass</code>，answer 必须收敛成 <code>active</code> 或 <code>passive</code> —— 不然两端都等对方先握手</li>
+  <li><code>a=sctp-port</code> 双方各选各的端口；<code>a=max-message-size</code> 双方各报各的接收上限（可能不同）</li>
+</ul>
+
+<p>你的 <code>acceptAnswer()</code> 把解压后的 answer 直接 <code>setRemoteDescription</code> 完事——因为 answer 里没有新东西需要协商，ICE 层拿到双方候选者后自己开始连通性检查，连上即 <code>connected</code>。</p>
+
+<h2>三个「对号入座」</h2>
+<ol>
+  <li><strong>max-message-size 262144 ↔ 你的 256KiB−64 帧</strong>：不是拍脑袋定的，是浏览器协商出的单条消息上限。</li>
+  <li><strong>ordered:true ↔ 不在 SDP 里</strong>：通道参数走 DCEP 带内协商（RFC 8832），SDP 只建 SCTP 关联。</li>
+  <li><strong>iceServers: [] ↔ 只有 typ host 候选者</strong>：局域网 P2P 的全部地址清单就是两张网卡——这也预告了下一课：为什么一旦跨网，事情就变复杂。</li>
+</ol>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. <code>m=application 9 UDP/DTLS/SCTP webrtc-datachannel</code> 中的 UDP/DTLS/SCTP 表示什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。它描述整条传输栈：UDP 承载 DTLS、DTLS 承载 SCTP。应用层用途由末尾的 webrtc-datachannel 说明。">数据通道的完整协议栈</li>
+    <li data-feedback="不对。应用层协议由 m= 行末尾的 fmt 值（webrtc-datachannel）说明，不是中间这段。">数据通道的应用层协议</li>
+    <li data-feedback="不对。DTLS 是加密层之一，但这段描述的是三层完整栈，不只是加密。">数据通道的加密算法套件</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 为什么你的 offer 里只有 host 类型候选者？</p>
+  <ol class="options">
+    <li data-feedback="正确。defaultPcFactory 传了 iceServers: []，没有 STUN/TURN，ICE 就只收集网卡上的 host 地址。">因为未配置任何穿透服务器</li>
+    <li data-feedback="不对。局域网同样需要地址——host 候选者本身就是局域网地址，不是没有地址。">因为局域网内无需地址映射</li>
+    <li data-feedback="不对。你的代码显式等 gathering complete 才取 SDP，候选者是收齐的。">因为候选者收集还在进行</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. <code>a=max-message-size:262144</code> 直接对应你 SPEC 里的什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。单条 SCTP 用户消息上限 256KiB；你的帧是 256KiB−64，64 字节留给帧头。">单条消息大小的上限</li>
+    <li data-feedback="不对。文件大小上限是产品层约束（~10GB），与 max-message-size 无关。">单个文件大小的上限</li>
+    <li data-feedback="不对。它是媒体级属性，限制的是数据通道的单条消息，不是 SDP 文本长度。">单条 SDP 长度的上限</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. <code>createDataChannel('lt', { ordered: true })</code> 里的 ordered 会写进 SDP 吗？</p>
+  <ol class="options">
+    <li data-feedback="正确。通道参数经 DCEP 在 SCTP 关联建立后带内协商，SDP 只负责建起 SCTP 关联。">不会，通道参数走带内协商</li>
+    <li data-feedback="不对。ordered/reliable/label 都不出现在 SDP 里，那是 DCEP 控制消息的内容。">会的，写入 a=ordered 属性</li>
+    <li data-feedback="不对。SDP 的媒体行描述的是 SCTP 关联，不是单个通道的参数。">会写入媒体行的属性字段</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.rfc-editor.org/rfc/rfc8841.html">RFC 8841</a> 的第 4 节（m= 行）、第 6 节（max-message-size）和第 13.1 节（完整 offer/answer 示例）——总共不到 20 分钟，你会看到本课所有 <code>a=</code> 行的权威出处。配套 <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Using_data_channels">MDN: Using WebRTC data channels</a> 的「Understanding message size limits」一节。</p>
+
+<h2>下一课</h2>
+<p><strong>第 3 课：NAT —— 为什么互联网上的「直接连接」不直接</strong>。你的 offer 里只有 <code>typ host</code> 候选者，这在局域网成立；一旦两台设备隔着 NAT，事情会完全不一样。这是你点名的盲区，也是 P2P 最硬核的部分。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它可以展开任意一行、画时序图，或拿你的 SPEC 对照。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../lessons/0001-signaling-plane-vs-data-plane.html">← 第 1 课</a> · <a href="../RESOURCES.md">资源清单</a> · 第 2 课 / 共 7 课</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/order.js"></script>
+</body>
+</html>

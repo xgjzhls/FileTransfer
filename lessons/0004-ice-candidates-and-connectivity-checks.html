@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 4 课 · ICE —— 候选者与连通性检查 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>ICE：候选者、连通性检查与「选路」</h1>
+<p class="subtitle">第 4 课 · 上一课你看到了 <code>a=candidate … typ host</code>；本课讲完整故事：ICE 如何把「能找到我的所有地址」列出来，逐个试，选出能用的那条路。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能解释四种候选者（host / srflx / prflx / relay）从哪来、连通性检查怎么证明一条路可用、为什么需要「控制方」单一决策——并说清你的项目当前只走 ICE 的第一步。</div>
+
+<h2>ICE 是什么</h2>
+
+<p>第 3 课我们知道了 NAT 让「你以为的地址」常常不可达。ICE（Interactive Connectivity Establishment，<a href="https://www.rfc-editor.org/rfc/rfc8445.html">RFC 8445</a>）的应对哲学是：<strong>不知道哪条路通，就把所有可能的路都列出来，逐一实测。</strong></p>
+
+<p>RFC 8445 的概述（§2）说得很直白：</p>
+
+<blockquote>
+  <p>Each agent has a variety of candidate transport addresses … it could use to communicate with the other agent. … The purpose of ICE is to <strong>discover which pairs of addresses will work</strong>. The way that ICE does this is to <strong>systematically try all possible pairs</strong> (in a carefully sorted order) until it finds one or more that work.</p>
+  <span class="src">—— <a href="https://www.rfc-editor.org/rfc/rfc8445.html">RFC 8445</a> §2 Overview of ICE</span>
+</blockquote>
+
+<p>ICE 分四步：<strong>收集候选 → 交换候选（走信令）→ 配对 + 连通性检查 → 提名定选</strong>。第 1、2 步你在第 2 课已经见过（SDP 里的 <code>a=candidate</code> 行就是「交换」的载体）。</p>
+
+<h2>四种候选者（RFC 8445 §5.1.1）</h2>
+
+<table>
+<thead><tr><th>类型</th><th>从哪来</th><th>含义</th></tr></thead>
+<tbody>
+<tr><td class="term">host<br><span class="en">主机候选</span></td><td>本机网卡</td><td>局域网地址（192.168.x.x）。只有同网段的对端能到达——你的项目唯一类型。</td></tr>
+<tr><td class="term">srflx<br><span class="en">服务器反射</span></td><td>问 STUN「我外面是什么」</td><td>NAT 分配的公网映射。NAT 行为正常（非对称）时外部可达。</td></tr>
+<tr><td class="term">relay<br><span class="en">中继候选</span></td><td>向 TURN 申请</td><td>服务器上的地址，数据经 TURN 转发。几乎总可用，代价是带宽与延迟。</td></tr>
+<tr><td class="term">prflx<br><span class="en">对端反射</span></td><td>检查过程中意外发现</td><td>双方都没预料到的 NAT 映射——symmetric NAT 场景下的救星（第 3 课伏笔）。</td></tr>
+</tbody>
+</table>
+
+<p>注意 <strong>base（基线地址）</strong>的概念：<code>srflx</code> / <code>relay</code> 是从「别处」映射来的地址，主机不能直接从这个地址发包——所有包都从 <strong>base</strong>（对应的 host 地址或到 TURN 的本地端点）发出。RFC 8445 明确说「an ICE agent cannot send requests directly from a reflexive candidate … but only from its base」。</p>
+
+<h2>优先级：先试哪条路</h2>
+
+<p>候选者按优先级排序，类型偏好是主导因素（RFC 8445 §5.1.2.2）：<strong>host 最高 → srflx → prflx → relay（通常为 0，最后手段）</strong>。RFC 还强制「peer-reflexive 的类型偏好必须高于 server-reflexive」。推荐公式是 <code>priority = 2²⁴×type + 2⁸×local + component</code>——类型权重占了 24 位，所以类型几乎总是压过同类型内的差异。</p>
+
+<p>交换后，每端把<b>自己的每个候选 × 对方的每个候选</b>配对成候选对，按 <code>pair priority = 2³²×MIN(G,D) + 2×MAX(G,D) + (G&gt;D?1:0)</code> 排序（G、D 是双方的候选优先级）。排在前面的对先试。</p>
+
+<h2>连通性检查：怎么证明一条路「通」</h2>
+
+<p>每对候选都要实测：从本地候选的 base 向远端候选发一个 <strong>STUN Binding Request</strong>（RFC 8445 §7）。收到回包意味着三件事同时成立：</p>
+<ol>
+  <li><strong>这条路双向通</strong>——包能出去，回包能回来；</li>
+  <li><strong>对方持有会话凭据</strong>——请求里带着从信令拿到的 ufrag/pwd（第 2 课那两行的用途兑现了），伪造的包无法假装成一次成功的检查；</li>
+  <li>NAT 的洞已经被「双向各发一次」打开（打洞的机制性收益）。</li>
+</ol>
+
+<p>检查按优先级顺序逐个来，节奏由计时器 <strong>Ta</strong> 控制（默认 50ms 间隔，<a href="https://www.rfc-editor.org/rfc/rfc8445.html">RFC 8445 §14</a>），并且对候选对总数有上限（默认 100 对）——这是为了防止 ICE 被利用做流量放大攻击（RFC 8445 §19.5.1）。</p>
+
+<div class="key-insight">
+  <span class="label">关键洞见</span>
+  <p>连通性检查<b>同时完成两件事</b>：探路 + 打洞。它本身就是「双方同时向对方公网地址发包」——正是 Ford 论文里打洞的过程。ICE 把打洞从「应用技巧」变成了「协议内建步骤」。这是理解整个 P2P 建连最关键的一步。</p>
+</div>
+
+<h2>控制方与被控方：为什么只能一个人拍板</h2>
+
+<p>双方都在跑检查，但<b>只有一方能决定用哪对</b>。发起方默认是 <strong>controlling</strong>（控制方），另一方是 <strong>controlled</strong>（被控方，RFC 8445 §6.1.1）。控制方对选中的候选对发出带 <code>USE-CANDIDATE</code> 标记的检查，被控方确认后这条路被「提名」，ICE 收尾。</p>
+
+<p>为什么需要单一决策者？RFC 8445 的设计动机（附录 B.7）说得清楚：如果两边各自定夺，可能各选一条不同的路，媒体数据会沿着两条路径流，连接直接错乱。所以角色必须分派，冲突时用「ice-controlling/ice-controlled」属性解决。</p>
+
+<h2>Trickle vs 非 Trickle：两种交换节奏</h2>
+
+<p>第 2 课讲过你的实现是<b>非 trickle</b>（等 gathering complete 一次性发完整 SDP）。浏览器默认走的是 <strong>trickle ICE</strong>（<a href="https://www.rfc-editor.org/info/rfc8838">RFC 8838</a>）：每个候选一出现就立刻经信令发过去，<code>icecandidate</code> 事件每触发一次发一条。host 候选几乎瞬时可用，所以在友好网络下连接可以在收集完成前就建立。</p>
+
+<p>两种节奏各有理由：trickle 快，但要求信令通道支持多次小消息（你的 QR 一次只能装一个码，天然不适合）；非 trickle 慢一点，但一次搞定、适合单次装载。你的选择不是缺陷，是载体约束下的正确设计。</p>
+
+<h2>对号入座：你的代码在 ICE 里的位置</h2>
+
+<pre><code>// src/webrtc/peer.ts
+export function defaultPcFactory(): RTCPeerConnection {
+  return new RTCPeerConnection({ iceServers: [] })   // ← 没有 STUN/TURN
+}</code></pre>
+
+<ul>
+  <li>你只走 ICE 的第一步：收集 host 候选（网卡地址）→ 交换 → 配对 → 连通性检查。因为局域网内 host 候选直接可达，检查必过，连接秒建。</li>
+  <li>加上 <code>iceServers: [{ urls: 'stun:…' }]</code>，SDP 里就会出现 <code>typ srflx</code>；加上 TURN 会有 <code>typ relay</code>。同一套代码，ICE 会自动处理更多候选——这是把 LocalTransfer 扩展到跨网的最小改动路径。</li>
+  <li>想亲眼看检查过程：Chrome 的 <code>chrome://webrtc-internals</code> 能看到收集到的候选、每一对检查与最终选中的对；Firefox 是 <code>about:webrtc</code>。</li>
+</ul>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. 哪种候选者是由 STUN 服务器获得的？</p>
+  <ol class="options">
+    <li data-feedback="正确。STUN 把「我看到的你的公网地址」回给客户端，即服务器反射候选（srflx）。">服务器反射候选者</li>
+    <li data-feedback="不对。那是 host 候选：直接来自本机网卡，不经过任何服务器。">主机网卡地址候选</li>
+    <li data-feedback="不对。那是 relay 候选：由 TURN 服务器分配并负责转发数据。">中继转发的候选者</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 连通性检查具体发的是什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。从本地候选的 base 向远端候选发 STUN Binding Request，收到回包即证明该路径双向可用。">STUN 的绑定请求</li>
+    <li data-feedback="不对。SDP 是信令面交换的描述文本，检查阶段发的是探测包，不是描述。">SDP 格式会话描述</li>
+    <li data-feedback="不对。提名发生在检查成功之后（USE-CANDIDATE 标记），不是检查本身。">ICE 提名确认消息</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. 最终用哪对候选，由谁决定？</p>
+  <ol class="options">
+    <li data-feedback="正确。控制方（controlling）负责提名最终候选对，被控方确认后收尾——避免双方各选一条路。">控制方提名定选</li>
+    <li data-feedback="不对。被控方只确认，不做最终选择；角色分派是协议强制的。">被控方等待选择</li>
+    <li data-feedback="不对。双方各自决定会导致两条不同的路被选中，连接错乱——这正是单一决策者的理由。">双方各自选路径</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. 你的项目里为什么只有 host 候选者？</p>
+  <ol class="options">
+    <li data-feedback="正确。iceServers: [] 没有 STUN/TURN，ICE 就只收集网卡上的 host 地址；局域网内它们直接可达。">未配置任何穿透服务器</li>
+    <li data-feedback="不对。局域网同样需要地址——host 候选本身就是地址清单，只是不需要公网映射。">局域网内无需地址映射</li>
+    <li data-feedback="不对。你的实现显式等 gathering complete 才取 SDP，候选者是收齐的。">因为候选收集尚在进行</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.rfc-editor.org/rfc/rfc8445.html">RFC 8445</a> 第 2 节（Overview of ICE，10 分钟）——收集、检查、提名三步的完整叙述。再配 <a href="https://getstream.io/blog/what-is-ice-protocol/">getstream 的 What is ICE protocol?</a>（工程视角，含调试清单：先看候选收集，再看交换，再看选中的对——这条调试路径对你将来排查真实连接问题直接有用）。</p>
+
+<h2>下一课</h2>
+<p><strong>第 5 课：UDP 打洞</strong> —— ICE 的连通性检查在背后到底怎么「钻」出洞的，对称 NAT 为什么失败、prflx 怎么救场。这是「NAT + ICE」两课知识的汇合点。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它可以带你过一遍 chrome://webrtc-internals，或解释你特定路由器场景下会遇到哪种 NAT。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../lessons/0003-nat-why-direct-connections-arent.html">← 第 3 课</a> · <a href="../RESOURCES.md">资源清单</a> · 第 4 课 / 共 7 课</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

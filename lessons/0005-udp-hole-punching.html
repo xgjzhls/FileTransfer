@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 5 课 · UDP 打洞 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>UDP 打洞：怎么「钻」出一条直连</h1>
+<p class="subtitle">第 5 课 · 第 3 课（NAT 四分类）与第 4 课（ICE 连通性检查）的知识汇合点：洞是怎么钻出来的、对称 NAT 为什么失败、prflx 怎么救场。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能完整复述打洞的四步过程，说出它为什么在对称 NAT 下失败、端口预测是什么、以及「连通性检查 = 探路 + 打洞」这句话的含义。</div>
+
+<h2>打洞：P2P 最经典的一招</h2>
+
+<p>第 3 课我们留下了一个死局：NAT 默认丢弃入站包，那两台 NAT 后面的设备怎么直连？<strong>打洞（hole punching）</strong>的答案出人意料地简单：<strong>让「入站」看起来像「出站」</strong>——双方同时向对方的公网地址发包，各自 NAT 都以为这是「已建立的出站会话的一部分」，于是放行并建立映射。这个「建立映射」的动作，就是钻洞。</p>
+
+<p>这套机制第一次被系统整理是在 Ford、Srisuresh &amp; Kegel 2005 年的 USENIX 论文《Peer-to-Peer Communication Across Network Address Translators》（<a href="https://www.usenix.org/legacy/event/usenix05/tech/general/full_papers/ford/ford.pdf">PDF</a>）——也就是打洞这个词的出处。过程如下（论文 §3.2）：</p>
+
+<ol>
+  <li><strong>会合</strong>：两台设备 A、B 都先连上同一个服务器 S（rendezvous / 会合服务器，只做介绍人，不转发数据）。S 记录各自的 <b>公网端点</b>（NAT 外的地址）和 <b>私网端点</b>（本机地址）。</li>
+  <li><strong>互告</strong>：A 请求连 B，S 把 B 的两个端点告诉 A，同时把 A 的两个端点告诉 B。</li>
+  <li><strong>同发</strong>：A、B 各自向对方的公网端点发包——重点是<b>双方都在发</b>。</li>
+  <li><strong>洞成</strong>：A 的包经 NAT A 出去时，NAT A 记下「A 的私网端点 ↔ 目的 B 公网端点」的映射（洞）；B 的包同样在 NAT B 上留洞。两个洞都开好后，双向直连成立，S 退出舞台。</li>
+</ol>
+
+<p>论文原文描述第 3、4 步的机制（第 5 课引用）：</p>
+
+<blockquote>
+  <p>A's first outgoing message to B's public endpoint … in effect, <strong>"punches a hole"</strong> in A's NAT for a new UDP session identified by the endpoints (10.0.0.1:4321, 138.76.29.7:31000) … Once the first messages from A and B have crossed their respective NATs, holes are open in each direction and UDP communication can proceed normally.</p>
+  <span class="src">—— Ford, Srisuresh &amp; Kegel, USENIX 2005 §3.4（Peers Behind Different NATs）</span>
+</blockquote>
+
+<p>注意一个微妙的点：A 的包如果先到 NAT B，NAT B 会把它当作「未请求的入站包」丢掉——<b>但这没关系</b>，因为 B 自己的包随后也会打出一个洞，只要 B 发出的第一个包能穿过 NAT A（此时 NAT A 已因 A 的包建立了映射），直连就通了。打洞的成功依赖<b>时序上的幸运</b>，而这正是 ICE 连通性检查「两个方向都试、且带着凭据」能兜住的原因。</p>
+
+<h2>为什么对称 NAT 是打洞的终结者</h2>
+
+<p>打洞依赖一个前提：<strong>NAT 保持「同一私网端点 → 同一公网端点」的映射</strong>（论文 §5.1 叫 consistent endpoint translation）。A 的包发给 STUN 服务器时，NAT A 分配了公网端点 P；打洞时 A 从同一私网端点发往 B——如果 NAT A 复用 P，B 就能找到 A；如果 NAT A 给每个目的地都重新分配（<b>对称 NAT</b>），B 发往 P 的包会打到一条从未建立的映射上，被丢弃。</p>
+
+<p>论文原文：</p>
+
+<blockquote>
+  <p>Such a NAT is a <strong>symmetric NAT</strong> … after the NAT assigns the public endpoint … to client A's session with server S, the NAT might assign a <em>different public endpoint</em> to the P2P session that A tries to initiate with B. In this case, the hole punching process fails to provide connectivity.</p>
+  <span class="src">—— Ford et al. §5.1；RFC 5766 引言用更现代的术语表述：mapping 行为为「address-dependent / address-and-port-dependent」时打洞一般失败</span>
+</blockquote>
+
+<p>有个偏门技巧叫 <strong>端口预测</strong>：很多对称 NAT 分配端口有规律（每次 +1），可以「预测」下一个端口然后抢注。但论文明说这是「追移动靶」——端口可能被占、别人可能插队，不是稳健方案。</p>
+
+<h2>prflx 与打洞：第 4 课伏笔的兑现</h2>
+
+<p>ICE 的连通性检查发起的正是「双方同时向对方公网端点发包」——所以检查成功的过程就是打洞成功的过程。还有一个彩蛋：如果 STUN 报的 srflx 不对（对称 NAT），检查过程中对端仍可能从某个<b>你没预料到的地址</b>收到回包——这个地址被记录为 <strong>prflx（peer-reflexive）候选</strong>，往往是「连 srflx 都失效时救场的那条路」。RFC 8445 因此强制 prflx 的类型偏好高于 srflx。</p>
+
+<div class="key-insight">
+  <span class="label">本课核心</span>
+  <p>打洞不是魔法，它只是利用了 NAT 的规则：<b>「出站会话」自动放行回包</b>。P2P 应用做的唯一一件事，是让「对方发给我的包」看起来像「我已建立会话的回包」——方法是双方<b>同时</b>向对方发。</p>
+</div>
+
+<h2>几个现实细节</h2>
+<ul>
+  <li><strong>同一 NAT 后面</strong>（两人共用一台路由器）：打洞时私网端点直接可达，走内网更快（论文 §3.3）；公网端点能否用取决于 NAT 是否支持 hairpin（论文 2005 年实测仅约 24% 支持）。</li>
+  <li><strong>多层 NAT</strong>（运营商 NAT + 家庭 NAT）：双方看到的「公网端点」其实在运营商域内，需要 hairpin 才能通（论文 §3.5）——这也是越来越常见的失败场景。</li>
+  <li><strong>洞会关</strong>：UDP 空闲超时（有的 20 秒）→ 需要 keepalive（第 3 课已讲）。</li>
+  <li><strong>要认证</strong>：打洞后收到的第一个包未必来自对端（私网地址冲突可能串到错误的主机），应用必须校验消息身份——ICE 用 ufrag/pwd，你的传输协议用文件/设备标识。</li>
+</ul>
+
+<h2>对号入座：你的 LocalTransfer</h2>
+<p>你的场景里「打洞」其实一直静默发生：同一网段两台设备的 host 候选互相可达，ICE 检查一发即中，无需任何穿越技巧。只有跨网（未来加 STUN/TURN 后）才会真正触发第 4 步的打洞路径。</p>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. 打洞过程中，会合服务器（rendezvous）扮演什么角色？</p>
+  <ol class="options">
+    <li data-feedback="正确。它只负责介绍：交换双方的公网/私网端点，之后退出，不参与数据传输。">会合服务器交换端点信息</li>
+    <li data-feedback="不对。那是 TURN 的职责；打洞成功后数据完全不经过服务器。">中继服务器转发所有数据</li>
+    <li data-feedback="不对。打洞不依赖身份验证服务器，双方凭据在信令里交换。">认证服务器验证双方身份</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 让 NAT 放行对方入站包的关键动作是什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。双方同时向对方公网端点发包，各自的 NAT 都以为是出站会话的一部分而建立映射（钻洞）。">双方同时向对方公网地址发包</li>
+    <li data-feedback="不对。私网地址互不可达，且包根本不出 NAT；这正是打洞要解决的问题。">双方同时向对方内网地址发包</li>
+    <li data-feedback="不对。经会合服务器中转就不是直连了，与打洞的目标相反。">双方都经会合服务器中转发包</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. 对称 NAT 下打洞为什么失败？</p>
+  <ol class="options">
+    <li data-feedback="正确。对称 NAT 每目的地一个新映射：对方发往 STUN 看到的那个地址，NAT 会开新映射而非复用，包到不了。">每目的地映射不同，包到不了</li>
+    <li data-feedback="不对。固定映射但过滤严格的 NAT（限制锥）打洞反而能成功——过滤只影响谁能进，不影响洞本身。">映射固定但过滤严格，包被拒</li>
+    <li data-feedback="不对。打洞不经过中继服务器，失败是 NAT 映射行为导致的，与 TURN 无关。">中继服务器拒绝对称转发数据</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. prflx（对端反射）候选者是在哪一步被发现的？</p>
+  <ol class="options">
+    <li data-feedback="正确。连通性检查中，回包可能来自双方都没预料到的地址——它被记录为 prflx 候选。">连通性检查过程意外发现</li>
+    <li data-feedback="不对。srflx 才是候选收集阶段由 STUN/服务器发现的；prflx 出现得更晚。">候选收集阶段服务器发现</li>
+    <li data-feedback="不对。候选交换只传递已收集的地址，prflx 是检查阶段才涌现的。">信令交换过程中对端告知</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.usenix.org/legacy/event/usenix05/tech/general/full_papers/ford/ford.pdf">Ford et al. 2005</a> 的第 3 节（打洞过程与三种场景）和第 5 节（P2P 友好的 NAT 行为）——约 30 分钟，这是打洞的原始出处，写得非常清楚。配合 <a href="https://en.wikipedia.org/wiki/UDP_hole_punching">Wikipedia: UDP hole punching</a> 的图解回看。</p>
+
+<h2>下一课</h2>
+<p><strong>第 6 课：TURN 中继</strong> —— 打洞失败时的最后手段。数据绕道服务器，但代价是什么？TURN 怎么在「保证可用」和「控制成本」之间平衡？</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它可以用你家路由器举例，或画出打洞的时序图。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../lessons/0004-ice-candidates-and-connectivity-checks.html">← 第 4 课</a> · <a href="../RESOURCES.md">资源清单</a> · 第 5 课 / 共 7 课</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

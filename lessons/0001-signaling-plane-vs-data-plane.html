@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 1 课 · 为什么传文件前要先「扫码握手」 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>为什么传文件前要先「扫码握手」</h1>
+<p class="subtitle">第 1 课 · 信令面与数据面 —— 这门课的第一个心智模型，后面所有课都建立在它上面。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：上完这课，你能从<b>协议层面</b>回答「为什么传文件前要先扫码（信令），而且纯离线至少要扫两次」——而不是背一个结论。</div>
+
+<h2>一个反直觉的事实</h2>
+<p>你拿起 iPhone 和 iPad，打开 LocalTransfer：扫码、出回码、再扫一次，然后一个 3GB 的视频开始在两台设备间直连传输。文件数据明明走的是<b>两台设备之间的直连</b>，为什么开头非要扫两次码？这两次扫码传的到底是什么？为什么不能只扫一次？</p>
+
+<p>答案藏在一个反直觉的事实里，MDN 的原话是：</p>
+
+<blockquote>
+  <p>WebRTC can't create connections without some sort of server in the middle. We call this the <strong>signal channel</strong> or signaling service. … Whether by email, postcard, or a carrier pigeon. It's up to you.</p>
+  <span class="src">—— MDN: <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Connectivity">WebRTC connectivity</a></span>
+</blockquote>
+
+<p>「直连」需要先有人告诉双方「对方在哪、怎么连」。而这个「告诉」的过程，<b>恰恰不能发生在直连上</b>——因为直连还没建立。这是一个先有鸡还是先有蛋的问题，WebRTC 的解法是：把「商量怎么连」和「真的连」分成两个互相独立的平面。</p>
+
+<h2>两个平面：信令面 与 数据面</h2>
+
+<table>
+<thead><tr><th></th><th>信令面（signaling plane）</th><th>数据面（data plane）</th></tr></thead>
+<tbody>
+<tr><td class="term">干什么</td><td>商量「怎么连」：交换 SDP、ICE 候选者</td><td>真的传数据：你的文件字节</td></tr>
+<tr><td class="term">载体</td><td>任意：WebSocket、QR 码、fetch、信鸽</td><td>WebRTC DataChannel</td></tr>
+<tr><td class="term">生命周期</td><td>先发生，可能反复（重协商）</td><td>协商完成后才存在</td></tr>
+<tr><td class="term">你的项目</td><td>WS 房间（在线）+ QR 码（离线）</td><td>DataChannel + 分块传输（<code>src/webrtc/</code>）</td></tr>
+</tbody>
+</table>
+
+<p>类比：两个人第一次约会。见面之前，必须先通过<b>外部渠道</b>（发消息、打电话）约定「几点、在哪、我穿什么颜色的衣服」。等真的见了面（数据面建立），才能牵手递东西。那个「约定」本身不可能发生在见面之后——这就是信令面必须独立存在的根本原因。</p>
+
+<div class="key-insight">
+  <span class="label">心智模型</span>
+  <p>WebRTC 不是「连接协议」，而是<b>「协商协议」</b>。它定义的是「双方怎么达成共识」，至于共识达成后数据怎么走，是 ICE 和 DataChannel 的事。<b>信令载体可以随便换</b>，这正是你「单协议多载体」设计（WS / QR / 原生通道 / 本地 WSS，ADR-0004）的理论根据：载体可换，协议不变。</p>
+</div>
+
+<h2>为什么协商必须双向 —— 两跳的必然性</h2>
+
+<p>协商的内容是 <a href="../reference/glossary.html">SDP</a>：一端生成 <strong>offer</strong>（「我提议这样连」），另一端基于收到的 offer 生成 <strong>answer</strong>（「我接受 / 我这样调整」）。MDN 给出的流程里有两个关键点：</p>
+
+<ol>
+  <li>接收方必须先 <code>setRemoteDescription(offer)</code>，然后才能 <code>createAnswer()</code> —— <b>answer 的内容是由对方的 offer 决定的</b>，不能凭空生成。</li>
+  <li>每一端都维护两份描述：<code>localDescription</code>（描述<b>自己</b>）+ <code>remoteDescription</code>（描述<b>对端</b>）。只有当双方都拿到对方的描述，协商才算完成。</li>
+</ol>
+
+<p>所以信息流是：A → B 传 offer，B → A 传 answer，<b>至少两个方向各一次</b>。在纯浏览器离线场景，一次方向上的传输只能靠「屏幕 → 摄像头」一次扫码完成——于是两跳（offer 跳 + answer 跳）是<b>协议语义决定的物理下限，不是实现偷懒</b>。你在 <a href="../decisions/adr/0007-offline-pairing-two-hop.md">ADR-0007</a> 里写下过这个结论，现在你知道它从哪来了。</p>
+
+<div class="key-insight">
+  <span class="label">对号入座</span>
+  <p>打开 <code>src/protocol/signaling.ts</code>：<code>SignalPayload</code> 的 <code>kind</code> 字段只有两个值 <code>'offer' | 'answer'</code>，配合一个 <code>sdp</code> 字符串。这不是巧合——协商协议天然只需要这两种消息，你的类型定义精准对应了协议模型。</p>
+</div>
+
+<h2>信令通道是黑盒</h2>
+
+<p>信令通道不需要理解自己在传什么。MDN 原话：</p>
+
+<blockquote>
+  <p>The content of the message going through the signaling server is, in effect, a <strong>black box</strong>. … All you have to do is <strong>channel the information back and forth</strong>. The contents don't matter at all to the signaling server.</p>
+  <span class="src">—— MDN: <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Signaling_and_video_calling">Signaling and video calling</a></span>
+</blockquote>
+
+<p>你的实现就是这个思想的教科书样例：</p>
+<ul>
+  <li><code>server/src/roomDo.ts</code> —— Durable Object 房间，只做 WebSocket 生命周期 + presence 广播，<code>signal</code> 消息原样转发，不理解也不检查 SDP 内容。</li>
+  <li><code>src/qr/qrCodec.ts</code> —— 离线载体上，QR 只是「压缩了 SDP 的黑盒」。扫码的人类 + 摄像头，就是那根「信鸽」。</li>
+</ul>
+
+<p>这也带来一个推论：<b>信令只要求「忠实投递」，不要求「理解内容」</b>——所以四种载体能共享同一份 <code>SignalPayload</code> 结构，这也让协议可测试、可审计。</p>
+
+<h2>把本课串起来</h2>
+
+<p>下次有人问「为什么传文件前要先扫码」，你可以这样回答（三层递进）：</p>
+
+<ol>
+  <li><b>要直连，得先互相交代</b>：对方在哪、怎么连 —— 这是 SDP offer/answer 协商。</li>
+  <li><b>商量本身不能走数据面</b>：数据面还没建立，所以信令面必须独立存在，且载体任意。</li>
+  <li><b>协商是双向的</b>：answer 依赖 offer，信息流必须各走一次 —— 离线扫码就是两跳。</li>
+</ol>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. 信令面与数据面，谁先谁后？</p>
+  <ol class="options">
+    <li data-feedback="正确。数据面要直连，必须先经信令面协商出连接参数与地址；而协商本身不能走数据面——它还没建立。">先协商后传输</li>
+    <li data-feedback="不对。数据面建立之前，双方连对方的地址都不知道，无法先传数据——这正是信令面存在的原因。">先传输后协商</li>
+    <li data-feedback="不对。初次建连必须先完成协商，数据面才能流动（建立后的重协商是另一回事）。">边协商边传输</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. 纯离线场景，为什么至少需要两跳扫码？</p>
+  <ol class="options">
+    <li data-feedback="正确。SDP 协商是 offer → answer 的双向交换，每方向一次扫码，至少两跳。这是协议语义决定的物理下限。">SDP 协商需要双向交换</li>
+    <li data-feedback="不对。若只需单向交换，一跳就够了——但 answer 必须基于对方的 offer 生成，信息必须流回发起方。">SDP 协商需要单向交换</li>
+    <li data-feedback="不对。offer/answer 各一次即可完成协商，不需要第三次；额外的交换（如 ICE 候选者）是另一回事。">SDP 协商需要三次交换</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. 信令通道（WS 房间 / QR 码 / 服务端）在协商中扮演什么角色？</p>
+  <ol class="options">
+    <li data-feedback="正确。信令通道是黑盒：只负责忠实投递 offer/answer，不理解内容——所以你的 roomDo 能原样转发 signal。">中转协商消息的黑盒</li>
+    <li data-feedback="不对。文件数据走的是数据面（DataChannel），信令通道从不接触文件字节。">中转文件数据的通道</li>
+    <li data-feedback="不对。连接的最终决定由 ICE 在两台设备间作出，信令通道只是传递消息的管道。">决定连接方式的主宰</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. localDescription 与 remoteDescription 分别描述什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。本地描述描述自己这一端，远端描述描述对端；两端都拿到对方的描述后协商才算完成。">本端与对端的连接配置</li>
+    <li data-feedback="不对。local 描述自己、remote 描述对方，不会反着来——否则协商将无法达成共识。">对端与本端的连接配置</li>
+    <li data-feedback="不对。描述的是「连接配置」（格式、协议、地址），不是传输的文件内容——那是数据面的事。">双方之间的数据传输内容</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>用 10 分钟读完 MDN 的 <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API/Signaling_and_video_calling">Signaling and video calling</a>（重点读「The signaling server」和「Exchanging session descriptions」两节），你会发现本课所有内容都出自那里。它是全课最权威的参考，值得回读。</p>
+
+<h2>下一课</h2>
+<p><strong>第 2 课：SDP 里到底写了什么</strong> —— 我们把你项目里 QR 压缩的那段 SDP 解压出来，逐段读一遍，认识 offer 里那些 <code>m=</code>、<code>a=</code> 行。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它是你的老师，可以随时展开讲解、画图或拿你的代码举例。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../RESOURCES.md">资源清单</a> · 第 1 课 / 共 7 课（课程弧线见 <a href="../NOTES.md">NOTES.md</a>）</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

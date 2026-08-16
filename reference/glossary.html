@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>词汇表 · WebRTC / P2P · LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>词汇表</h1>
+<p class="subtitle">WebRTC / P2P 术语对照 —— 每课共用，随课程扩展。项目内既有术语（房间码、跳、续传块等）见 <code>CONTEXT.md</code> 词汇表，本表只收课程引入的协议层术语。</p>
+
+<table>
+<thead>
+<tr><th>中文</th><th>英文</th><th>定义</th></tr>
+</thead>
+<tbody>
+
+<tr>
+<td class="term">信令面</td>
+<td class="en">signaling plane</td>
+<td>建连前「商量怎么连」的通道：交换 SDP 与 ICE 候选者。WebRTC 不规定其载体，WebSocket、QR 码、信鸽都行。</td>
+</tr>
+
+<tr>
+<td class="term">数据面</td>
+<td class="en">data plane</td>
+<td>建立后真正传输文件字节的通道：本项目的 DataChannel。数据面与信令面相互独立。</td>
+</tr>
+
+<tr>
+<td class="term">会话描述</td>
+<td class="en">session description</td>
+<td>连接一端配置的完整描述：媒体类型/格式、传输协议、IP 与端口、候选者等。WebRTC 中即 SDP。</td>
+</tr>
+
+<tr>
+<td class="term">SDP</td>
+<td class="en">Session Description Protocol</td>
+<td>描述会话的文本协议（RFC 8866）。offer/answer 交换的就是 SDP 字符串；本项目 QR 里压缩的就是它。</td>
+</tr>
+
+<tr>
+<td class="term">提案</td>
+<td class="en">offer</td>
+<td>发起方生成的会话提案：「我提议这样连」。需通过信令面送达对端。</td>
+</tr>
+
+<tr>
+<td class="term">应答</td>
+<td class="en">answer</td>
+<td>接收方基于收到的 offer 生成的回复：「我接受/我这样调整」。不能独立于 offer 生成。</td>
+</tr>
+
+<tr>
+<td class="term">本地描述</td>
+<td class="en">local description</td>
+<td>描述「自己这一端」的 SDP。每端各持一份。</td>
+</tr>
+
+<tr>
+<td class="term">远端描述</td>
+<td class="en">remote description</td>
+<td>描述「对端」的 SDP，由收到的 offer/answer 设置。两端各持有对方的描述后，协商才完成。</td>
+</tr>
+
+<tr>
+<td class="term">ICE</td>
+<td class="en">Interactive Connectivity Establishment</td>
+<td>在两台设备间找到可用传输路径的协议（RFC 8445）：收集候选者、两两配对、连通性检查、选最优。</td>
+</tr>
+
+<tr>
+<td class="term">候选者</td>
+<td class="en">ICE candidate</td>
+<td>「我这边能用的连接方式」：协议（UDP/TCP）+ IP + 端口 + 类型。每个候选者描述一种可达自己的方式。</td>
+</tr>
+
+<tr>
+<td class="term">NAT</td>
+<td class="en">Network Address Translation</td>
+<td>把内网地址映射到公网地址的机制。它让内网设备「能出去」，但默认阻挡「从外面进来」—— P2P 需要绕过的核心障碍。</td>
+</tr>
+
+<tr>
+<td class="term">STUN</td>
+<td class="en">Session Traversal Utilities for NAT</td>
+<td>「照镜子」服务：问它「我的公网地址/端口是什么」，让设备发现自己的映射。只回答，不中转数据。</td>
+</tr>
+
+<tr>
+<td class="term">TURN</td>
+<td class="en">Traversal Using Relays around NAT</td>
+<td>最后手段的中继：双方都连不上时，数据经 TURN 服务器转发。成本高（服务器带宽），但几乎总是可用。</td>
+</tr>
+
+<tr>
+<td class="term">打洞</td>
+<td class="en">hole punching</td>
+<td>利用 NAT 的出站映射：双方同时向对方发 UDP，各自 NAT 上留下映射，从而「钻出」一条直连。对称 NAT 下失败。</td>
+</tr>
+
+<tr>
+<td class="term">DataChannel</td>
+<td class="en">RTCDataChannel</td>
+<td>在 PeerConnection 上传输任意二进制/文本数据的通道，与媒体无关。本项目文件字节的载体。</td>
+</tr>
+
+<tr>
+<td class="term">有序/无序</td>
+<td class="en">ordered / unordered</td>
+<td>DataChannel 的投递语义：ordered 保证按发送顺序到达（靠重传）；unordered 允许乱序（丢包不重传，快）。</td>
+</tr>
+
+<tr>
+<td class="term">可靠/不可靠</td>
+<td class="en">reliable / unreliable</td>
+<td>DataChannel 的丢失语义：reliable 丢包必重传；unreliable 允许丢弃（部分可靠，如有限重传次数）。</td>
+</tr>
+
+<tr>
+<td class="term">m= 行</td>
+<td class="en">media description line</td>
+<td>SDP 媒体描述行，格式 <code>m=&lt;类型&gt; &lt;端口&gt; &lt;协议&gt; &lt;格式&gt;</code>。DataChannel 对应 <code>m=application 9 UDP/DTLS/SCTP webrtc-datachannel</code>。</td>
+</tr>
+
+<tr>
+<td class="term">会话级 / 媒体级</td>
+<td class="en">session-level / media-level</td>
+<td>SDP 的两级结构：会话级行（v=/o=/s=/t= 及会话属性）描述整个会话；媒体级行（m= 开头及随后的 a= 属性）描述每一条媒体/数据通道。</td>
+</tr>
+
+<tr>
+<td class="term">max-message-size</td>
+<td class="en">max-message-size</td>
+<td>单条 SCTP 用户消息的最大字节数（RFC 8841，媒体级 SDP 属性）。缺省 64K；不能超过对方声明值。浏览器实际协商 262144（256KiB）—— 本项目单帧 256KiB−64 的出处。</td>
+</tr>
+
+<tr>
+<td class="term">DCEP</td>
+<td class="en">Data Channel Establishment Protocol</td>
+<td>通道建立协议（RFC 8832）：ordered/reliable/label 等通道参数经 SCTP <b>带内</b>协商，不写进 SDP。浏览器默认走这条，不用 SDP 的 dcmap 属性。</td>
+</tr>
+
+<tr>
+<td class="term">DTLS</td>
+<td class="en">Datagram Transport Layer Security</td>
+<td>数据通道的加密层（UDP 上的 TLS）。SDP 里通过 <code>a=fingerprint</code>（证书指纹）和 <code>a=setup</code>（角色协商 actpass/active/passive）配置。</td>
+</tr>
+
+<tr>
+<td class="term">主机候选</td>
+<td class="en">host candidate</td>
+<td>ICE 候选者的一种：设备网卡上的真实地址（如 192.168.x.x）。未配置 STUN/TURN 时是唯一候选类型 —— 本项目局域网场景的形态。</td>
+</tr>
+
+<tr>
+<td class="term">全锥 / 限制锥 / 端口限制锥 / 对称</td>
+<td class="en">full cone / restricted cone / port-restricted cone / symmetric NAT</td>
+<td>RFC 3489 §5 的四种 NAT 行为。映射维度：全锥与限制锥固定映射，对称 NAT 每目的地一个映射；过滤维度：谁能发包进来（任意 / 我联系过的 IP / 我联系过的 IP:端口 / 仅收到过我包的对方）。对称 NAT 下 STUN 无法工作。</td>
+</tr>
+
+<tr>
+<td class="term">服务器反射候选</td>
+<td class="en">server-reflexive candidate (srflx)</td>
+<td>向 STUN 询问「我外面的公网地址」得到的候选。NAT 非对称时外部可达。</td>
+</tr>
+
+<tr>
+<td class="term">对端反射候选</td>
+<td class="en">peer-reflexive candidate (prflx)</td>
+<td>连通性检查中意外发现的候选——双方都没预料到的 NAT 映射。对称 NAT 场景的救星；优先级必须高于 srflx（RFC 8445 §5.1.2.2）。</td>
+</tr>
+
+<tr>
+<td class="term">中继候选</td>
+<td class="en">relayed candidate</td>
+<td>向 TURN 申请、由服务器转发数据的候选。几乎总可用，代价是带宽与延迟；类型偏好通常为 0（最后手段）。</td>
+</tr>
+
+<tr>
+<td class="term">基线地址</td>
+<td class="en">base</td>
+<td>reflexive 候选对应的本地发包地址（host 地址或到 TURN 的本地端点）。反射候选不能直接发包，一切从 base 发出（RFC 8445 §6.1.2.2）。</td>
+</tr>
+
+<tr>
+<td class="term">连通性检查</td>
+<td class="en">connectivity check</td>
+<td>从本地候选的 base 向远端候选发 STUN Binding Request 并等回包，证明该候选对双向可用且对方持有会话凭据（RFC 8445 §7）。探路与打洞同时完成。</td>
+</tr>
+
+<tr>
+<td class="term">控制方 / 被控方</td>
+<td class="en">controlling / controlled agent</td>
+<td>ICE 角色。控制方（默认发起方）用 USE-CANDIDATE 提名最终候选对；被控方确认。单一决策者防止双方各选一条路（RFC 8445 §6.1.1）。</td>
+</tr>
+
+<tr>
+<td class="term">保活</td>
+<td class="en">keepalive / consent freshness</td>
+<td>UDP 无连接状态，NAT 靠空闲计时器回收映射（有的短至 20 秒），需周期性发包维持；ICE 的 consent freshness 要求 30 秒内无应答即停发（RFC 7675）。</td>
+</tr>
+
+<tr>
+<td class="term">Trickle ICE</td>
+<td class="en">trickle ICE (RFC 8838)</td>
+<td>候选一出现就逐个经信令发出，边收集边测试；浏览器默认行为。与「等全部收集完一次性发」的非 trickle 相对（本项目 QR 单次装载即非 trickle）。</td>
+</tr>
+
+<tr>
+<td class="term">会合服务器</td>
+<td class="en">rendezvous server</td>
+<td>打洞的介绍人：记录双方公/私端点并互换，之后退出，不转发数据（Ford et al. 2005）。</td>
+</tr>
+
+<tr>
+<td class="term">打洞</td>
+<td class="en">UDP hole punching</td>
+<td>双方同时向对方公网端点发包，各自 NAT 视为出站会话而建映射——让「入站」看起来像「出站回包」。对称 NAT 下失败。</td>
+</tr>
+
+<tr>
+<td class="term">端口预测</td>
+<td class="en">port prediction</td>
+<td>预测对称 NAT 下一个端口号并抢注的偏门技巧；Ford 论文称其为「追移动靶」，非稳健方案。</td>
+</tr>
+
+<tr>
+<td class="term">中继传输地址</td>
+<td class="en">relayed transport address</td>
+<td>TURN Allocate 分配的公网地址；对端发它、服务器转发。默认寿命 10 分钟，需 Refresh（RFC 5766）。</td>
+</tr>
+
+<tr>
+<td class="term">权限</td>
+<td class="en">TURN permission</td>
+<td>按对端 IP 授权（默认 5 分钟）后才能经中继入站；未授权地址被静默丢弃——防 TURN 变匿名转发器（RFC 5766 §2.3）。</td>
+</tr>
+
+<tr>
+<td class="term">通道绑定</td>
+<td class="en">ChannelBind / ChannelData</td>
+<td>TURN 的低开销数据模式：绑定 16 位通道号后，ChannelData 消息头比 Send/Data indication 小得多（RFC 5766 §11）。</td>
+</tr>
+
+<tr>
+<td class="term">PPID</td>
+<td class="en">SCTP Payload Protocol Identifier</td>
+<td>SCTP 用户消息的类型标识：50=DCEP、51=字符串、53=二进制（本项目帧）、56/57=空消息（RFC 8831 §6.6）。</td>
+</tr>
+
+<tr>
+<td class="term">部分可靠</td>
+<td class="en">partial reliability (PR-SCTP)</td>
+<td>限制重传次数（REXMIT）或存活毫秒（TIMED）的可靠投递（RFC 3758/7496）；DCEP 里写入 Reliability Parameter 字段。</td>
+</tr>
+
+<tr>
+<td class="term">背压</td>
+<td class="en">backpressure</td>
+<td>发送端看 bufferedAmount（排队未发字节数），超阈值暂停、低于阈值唤醒——在途数据有界，内存不涨。本项目 8MiB/4MiB。</td>
+</tr>
+
+</tbody>
+</table>
+
+<footer>
+<a href="../lessons/0001-signaling-plane-vs-data-plane.html">← 返回第 1 课</a> · LocalTransfer 教学课程 · 词汇表随课程扩展
+</footer>
+
+</body>
+</html>
