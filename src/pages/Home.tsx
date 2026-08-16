@@ -17,9 +17,10 @@ import { walkDirectory, filesFromWebkitDirectory, basename } from '../transfer/d
 import type { PickedDirFile } from '../transfer/dirPicker'
 import { groupTopLevel, shareNames, sumBytes, uniqueZipPaths, disambiguateRootVsDir } from '../transfer/folderExport'
 import type { FolderGroup } from '../transfer/folderExport'
-import { buildZip, ZIP_MIME } from '../transfer/zip'
-import type { ZipEntry } from '../transfer/zip'
-import { writeFileTree } from '../transfer/fsaExport'
+import { buildZipStream } from '../transfer/zip'
+import type { ZipStreamEntry } from '../transfer/zip'
+import { writeFileStreamTree } from '../transfer/fsaExport'
+import { opfsMergedFile, withOpfsTempFile, writableChunkSink } from '../storage/opfsExport'
 import { WakeLockManager } from '../wakelock/wakeLock'
 import type { WakeLockState } from '../wakelock/wakeLock'
 import { collectLocalCandidates, describeCandidateIp } from '../webrtc/diagnostics'
@@ -621,28 +622,20 @@ export default function Home() {
     if (!sessionId) return
     setExportMsg('拼接中…')
     try {
-      const bytes = await readMergedOf(item)
+      const file = await mergedFileOf(item)
       // 文件夹发送的文件名含相对路径（photos/a.jpg）：导出/下载必须用 basename
       // （a.download 与 share File.name 不允许路径分隔符）
       const name = basename(item.name)
       if (mode === 'download') {
-        // 桌面：保存到文件系统（下载目录或选择位置）
-        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: guessMime(name) })
-        const url = URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = name
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        URL.revokeObjectURL(url)
+        // 零拷贝：objectURL 由浏览器从磁盘流式读（不再整载内存，T23）
+        downloadBlob(file, name)
         setExportMsg(`已下载 ${name}（浏览器下载目录）`)
         return
       }
-      const file = new File([bytes.buffer as ArrayBuffer], name, { type: guessMime(name) })
       const target = classifyExport(name, item.size)
+      const shareFile = shareableFile(file, name)
       await navigator.share({
-        files: [file],
+        files: [shareFile],
         title: name,
         text: target === 'photo' ? '存储到照片' : '存储到文件',
       })
@@ -658,14 +651,38 @@ export default function Home() {
     }
   }
 
-  /** 读取接收端已拼接文件（exportFile 的 merge+read 模式，供文件夹导出复用） */
-  async function readMergedOf(item: RecvItem): Promise<Uint8Array<ArrayBuffer>> {
+  /** 读取接收端已拼接文件 → OPFS 磁盘背书 File（merge 在 worker 流式；getFile 零拷贝，T23） */
+  async function mergedFileOf(item: RecvItem): Promise<File> {
     const fileMeta = recvMetaRef.current.find((f) => f.id === item.id)
     if (!fileMeta || !sessionId) throw new Error('接收清单缺失')
     const adapter = getStorageAdapter()
     await adapter.merge(sessionId, item.id, item.name, fileMeta.parts.length)
-    // rpc 反序列化恒为 ArrayBuffer 支撑（worker 结构化克隆），cast 安全
-    return adapter.readMerged(sessionId, item.id, item.name) as Promise<Uint8Array<ArrayBuffer>>
+    return opfsMergedFile(sessionId, item.id, item.name)
+  }
+
+  /** 分享/下载用 File：磁盘背书 + 正确 MIME（OPFS getFile 的 type 为空；包装是惰性引用，不拷贝） */
+  function shareableFile(file: File, name: string): File {
+    return new File([file], name, { type: guessMime(name) })
+  }
+
+  /** 流式 zip：合并全部 → fflate 流式压缩 → OPFS exports/ 临时文件 → 磁盘背书 File（零驻留，T23） */
+  async function streamZipToFile(
+    zipName: string,
+    items: RecvItem[],
+    paths: Map<RecvItem, string>,
+  ): Promise<File> {
+    const entries: ZipStreamEntry[] = []
+    for (const it of items) {
+      entries.push({
+        path: paths.get(it)!,
+        byteLength: it.size,
+        stream: (await mergedFileOf(it)).stream(),
+      })
+    }
+    const { file } = await withOpfsTempFile(zipName, (writable) =>
+      buildZipStream(entries, writableChunkSink(writable)),
+    )
+    return file
   }
 
   /** 浏览器下载（a.download）—— 桌面端 zip / 分享失败时的落盘路径 */
@@ -689,30 +706,24 @@ export default function Home() {
   async function exportFolderZip(group: FolderGroup<RecvItem>) {
     setExportMsg(`正在压缩 ${group.dir || '全部文件'}/ 为 zip…`)
     try {
-      const paths = uniqueZipPaths(group.items)
-      const entries: ZipEntry[] = []
-      for (const it of group.items) {
-        entries.push({ path: paths.get(it)!, data: await readMergedOf(it) })
-      }
-      const blob = await buildZip(entries)
       const zipName = `${group.dir || '全部文件'}.zip`
+      const file = await streamZipToFile(zipName, group.items, uniqueZipPaths(group.items))
       if (CAN_SHARE_FILES && !HAS_FSA_PICKER) {
         try {
-          const file = new File([blob], zipName, { type: ZIP_MIME })
-          await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+          await navigator.share({ files: [shareableFile(file, zipName)], title: zipName, text: '存储到文件后解压，即还原目录结构' })
           setExportMsg(`已分享 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
           return
         } catch (shareErr) {
           if ((shareErr as Error).name === 'AbortError') return
           if ((shareErr as Error).name === 'NotAllowedError' || (shareErr as Error).name === 'SecurityError') {
-            downloadBlob(blob, zipName)
+            downloadBlob(file, zipName)
             setExportMsg(`分享不可用，已改为下载 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
             return
           }
           throw shareErr
         }
       }
-      downloadBlob(blob, zipName)
+      downloadBlob(file, zipName)
       setExportMsg(`已下载 ${zipName}（${group.items.length} 个文件，目录结构保留）`)
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
@@ -736,7 +747,7 @@ export default function Home() {
       setExportMsg(`正在导出 ${group.items.length} 个文件到「${dirHandle.name}」…`)
       const paths = uniqueZipPaths(group.items)
       for (const it of group.items) {
-        await writeFileTree(dirHandle, paths.get(it)!, await readMergedOf(it))
+        await writeFileStreamTree(dirHandle, paths.get(it)!, await mergedFileOf(it))
       }
       setExportMsg(`已导出 ${group.items.length} 个文件到「${dirHandle.name}」（目录结构保留，无需解压）`)
     } catch (e) {
@@ -746,16 +757,15 @@ export default function Home() {
     }
   }
 
-  /** 文件夹批量分享：全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平） */
+  /** 文件夹批量分享：全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；磁盘背书零拷贝，T23） */
   async function exportFolderShare(group: FolderGroup<RecvItem>) {
-    setExportMsg('正在拼接文件…')
+    setExportMsg('正在准备分享…')
     try {
       const names = shareNames(group.items)
       const files: File[] = []
       for (const it of group.items) {
         const shareName = names.get(it)!
-        const bytes = await readMergedOf(it)
-        files.push(new File([bytes.buffer as ArrayBuffer], shareName, { type: guessMime(shareName) }))
+        files.push(shareableFile(await mergedFileOf(it), shareName))
       }
       await navigator.share({ files, title: group.dir, text: '存储到文件（多个文件收进一个文件夹，子目录拍平）' })
       setExportMsg(`已批量分享 ${group.items.length} 个文件（分享面板选「存储到文件」）`)
@@ -771,36 +781,29 @@ export default function Home() {
 
   const orphanCount = orphans?.orphans.length ?? 0
 
-  /** T20：导出选中 zip（跨组打包，deflate level 6；分享/下载路由同分组 zip） */
+  /** T20：导出选中 zip（跨组打包，deflate level 6；分享/下载路由同分组 zip；流式零驻留，T23） */
   async function exportSelectedZip() {
     if (selectedItems.length === 0) return
     setExportMsg(`正在压缩选中文件为 zip…`)
     try {
-      // 跨组勾选：目录优先消歧（根散文件撞目录名）+ 同全路径去重（T20 评审修正）
-      const paths = disambiguateRootVsDir(selectedItems)
-      const entries: ZipEntry[] = []
-      for (const it of selectedItems) {
-        entries.push({ path: paths.get(it)!, data: await readMergedOf(it) })
-      }
-      const blob = await buildZip(entries)
       const zipName = '选中文件.zip'
+      const file = await streamZipToFile(zipName, selectedItems, disambiguateRootVsDir(selectedItems))
       if (CAN_SHARE_FILES && !HAS_FSA_PICKER) {
         try {
-          const file = new File([blob], zipName, { type: ZIP_MIME })
-          await navigator.share({ files: [file], title: zipName, text: '存储到文件后解压，即还原目录结构' })
+          await navigator.share({ files: [shareableFile(file, zipName)], title: zipName, text: '存储到文件后解压，即还原目录结构' })
           setExportMsg(`已分享 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
           return
         } catch (shareErr) {
           if ((shareErr as Error).name === 'AbortError') return
           if ((shareErr as Error).name === 'NotAllowedError' || (shareErr as Error).name === 'SecurityError') {
-            downloadBlob(blob, zipName)
+            downloadBlob(file, zipName)
             setExportMsg(`分享不可用，已改为下载 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
             return
           }
           throw shareErr
         }
       }
-      downloadBlob(blob, zipName)
+      downloadBlob(file, zipName)
       setExportMsg(`已下载 ${zipName}（${selectedItems.length} 个文件，目录结构保留）`)
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
@@ -823,7 +826,7 @@ export default function Home() {
       // 目录优先消歧：根散文件与目录首段同名时 FSA 建文件/建目录冲突会抛错（T20 评审修正）
       const paths = disambiguateRootVsDir(selectedItems)
       for (const it of selectedItems) {
-        await writeFileTree(dirHandle, paths.get(it)!, await readMergedOf(it))
+        await writeFileStreamTree(dirHandle, paths.get(it)!, await mergedFileOf(it))
       }
       setExportMsg(`已导出 ${selectedItems.length} 个文件到「${dirHandle.name}」（目录结构保留，无需解压）`)
     } catch (e) {
@@ -833,17 +836,16 @@ export default function Home() {
     }
   }
 
-  /** T20：批量分享选中（手机；子目录拍平，shareNames 消歧） */
+  /** T20：批量分享选中（手机；子目录拍平，shareNames 消歧；磁盘背书零拷贝，T23） */
   async function exportSelectedShare() {
     if (selectedItems.length === 0) return
-    setExportMsg('正在拼接文件…')
+    setExportMsg('正在准备分享…')
     try {
       const names = shareNames(selectedItems)
       const files: File[] = []
       for (const it of selectedItems) {
         const shareName = names.get(it)!
-        const bytes = await readMergedOf(it)
-        files.push(new File([bytes.buffer as ArrayBuffer], shareName, { type: guessMime(shareName) }))
+        files.push(shareableFile(await mergedFileOf(it), shareName))
       }
       await navigator.share({ files, title: '选中文件', text: '存储到文件（多个文件收进一个文件夹，子目录拍平）' })
       setExportMsg(`已批量分享 ${selectedItems.length} 个文件（分享面板选「存储到文件」）`)

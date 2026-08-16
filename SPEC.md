@@ -86,11 +86,11 @@ disconnected → 在线：自动重连 WS → 重新 signal → 新 DataChannel�
 - **导出**：完成后拼接 → `navigator.share({ files })`：
   - 单文件：`image/*|video/*` 且 < 300 MiB → 分享面板可「存储到照片」；大文件 → 「存储到文件」，界面提示可经 Files 分享面板导入照片（原生分享可处理大文件；spike 实测 ~600MiB 视频经 Web Share 崩溃）
   - **文件夹发送（name 含 `/`）**：接收端按顶层目录分组（`groupTopLevel`），目录组提供三种结构保持导出：
-    - **导出 zip（deflate 均衡压缩，level 6）**：整棵目录树打包为单个 zip（`zip.ts`，fflate 纯 JS 零运行时依赖，worker 异步不冻结 UI，UTF-8 文件名；单条目 ≤ 4GiB zip32 上限），分享（目标端「文件」App 选位置后原生解压；仅移动端——桌面 navigator.share 需激活尚在，压缩耗时后已失效会 NotAllowedError）或下载（桌面/无分享能力自动降级，两端一致）
-    - **导出到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标目录 → 按相对路径逐段建目录写入文件树（`fsaExport.ts`），无需解压即还原目录结构
-    - **批量分享**：组内全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；`shareNames` basename + 父目录前缀消歧）
+    - **导出 zip（deflate 均衡压缩，level 6）**：整棵目录树打包为单个 zip（`zip.ts` T23 自写流式 zip 写入器——本地头+数据描述符+中央目录，fflate 流式 `Deflate`/`AsyncDeflate`（worker）+ 自带 CRC-32，ondrain/链式背压，内存恒定不整包驻留；小条目 ≤4 MiB 同步压缩避免每条目起 worker；UTF-8 文件名；单条目 ≤ 4GiB zip32 上限），分享（目标端「文件」App 选位置后原生解压；仅移动端——桌面 navigator.share 需激活尚在，压缩耗时后已失效会 NotAllowedError）或下载（桌面/无分享能力自动降级，两端一致）
+    - **导出到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标目录 → 按相对路径逐段建目录写入文件树（`fsaExport.ts`，File.stream() 分块写，零驻留），无需解压即还原目录结构
+    - **批量分享**：组内全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平；`shareNames` basename + 父目录前缀消歧；磁盘背书 File 零拷贝，T23）
     - **根目录组**：散文件发送（name 无 `/`，如文件夹根目录文件）归入「全部文件/根目录」组，同样提供批量导出（zip/导出到文件夹/批量分享）；重名条目 zip/目录导出用 `uniqueZipPaths` 追加序号
-    - 导出不设大小上限（T22 移除 1 GiB 守卫；zip/批量分享整组读入内存，超大导出在 iOS 可能内存不足本次失败，已收数据不丢，可分批重试）
+    - 导出不设大小上限（T22 移除 1 GiB 守卫）；T23 流式化：单文件/批量分享走 OPFS 磁盘背书 File（`getFile()` 零拷贝），zip 流式压缩写 OPFS exports/ 临时文件（`withOpfsTempFile`），不再整载内存——700MB 级多文件分享不再因内存爆失败
   - **多选批量导出（T20）**：接收列表已完成文件行带复选框，可跨顶层目录组勾选任意组合，勾选后提供三种批量操作（现有逐文件与分组导出全部保留）：
     - **导出选中到文件夹…（桌面 Chrome/Edge）**：showDirectoryPicker 选目标 → 保持相对路径写入（`photos/a.jpg` → 目标目录下 `photos/a.jpg`；根目录散文件放目标根），无需解压
     - **导出选中 zip**：跨组勾选打包为单个 zip（deflate level 6；分享/下载路由同分组 zip）
