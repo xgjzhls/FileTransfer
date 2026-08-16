@@ -33,8 +33,13 @@ import { isValidPin, PIN_LENGTH, sanitizePin } from '../rooms/roomCode'
 import { clearLastRoom, getLastRoom, getOrCreateDeviceId, setLastRoom } from '../rooms/session'
 import OfflinePair from './OfflinePair'
 import type { FileMeta } from '../protocol/transfer'
-import type { PeerInfo } from '../protocol/signaling'
+import type { PeerInfo, SignalPayload } from '../protocol/signaling'
 import { detectKind } from '../device'
+// T05 局域网发现（ADR-0009）：mDNS 发现 + 原生信令通道 → WebRTC 数据面（分支 A）
+import { CHANNEL_ERRORS, DEFAULT_SIGNALING_PORT } from 'lan-discovery'
+import type { DeviceInfo as LanDeviceInfo, PeerConnectedEvent, TrackedDevice } from 'lan-discovery'
+import { LanDiscoverySession, describeLanError } from '../lan/lanSession'
+import { lanDiscoveryTransport } from '../lan/lanTransport'
 
 /** 信令服务地址（.env 注入，T03 部署；形如 wss://host/ws） */
 const SIGNALING_WSS = import.meta.env.VITE_SIGNALING_WSS ?? ''
@@ -177,6 +182,41 @@ export default function Home() {
     connStateRef.current = connState
   }, [connState])
 
+  // ── T05 局域网发现（ADR-0009，app 壳内）：设备列表 / 状态 / 连接编排 ──
+  const [lanDevices, setLanDevices] = useState<TrackedDevice[]>([])
+  const [lanStatus, setLanStatus] = useState('')
+  const [lanError, setLanError] = useState('')
+  /** 信令服务器监听端口（null = 未监听；启动失败提示用） */
+  const [lanPort, setLanPort] = useState<number | null>(null)
+  /** 正在点选连接的设备 id（按钮态） */
+  const [lanConnecting, setLanConnecting] = useState<string | null>(null)
+  /** 已建立原生信令通道的 peerId（UI「已连接」标记；瞬态幂等） */
+  const [lanConnectedIds, setLanConnectedIds] = useState<Set<string>>(new Set())
+  const lanSessionRef = useRef<LanDiscoverySession | null>(null)
+  /** 当前连接的信令载体：ws = 在线房间；lan = 原生信令通道（SDP 经 TCP） */
+  const transportRef = useRef<'ws' | 'lan'>('ws')
+  /** LAN 断线重连尝试计数（成功 connected 归零；封顶 3 次转手动） */
+  const lanReconnectAttemptsRef = useRef(0)
+  /** 等待重新发现的设备（peerId → 时间戳）；重新发现后自动重连 */
+  const pendingReconnectRef = useRef<{ id: string; at: number } | null>(null)
+  /** LAN 断线重连中（防 peerDisconnected 事件与 connState 效果双重触发） */
+  const lanReconnectingRef = useRef(false)
+  /** connectTo 后 peerConnected 迟迟不来的兑底（对端异常） */
+  const lanConnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /** 本机广告身份（TXT schema：name/id/kind/port/ver；端口在 startSignalingServer 依次尝试） */
+  const lanAdvertDevice = useMemo(
+    () => ({
+      name: device.name,
+      id: device.id,
+      // detectKind 只返回 phone/tablet/desktop（src/device.ts）；cast 收敛到插件 schema
+      kind: device.kind as LanDeviceInfo['kind'],
+      port: DEFAULT_SIGNALING_PORT,
+      ver: '1',
+    }),
+    [device],
+  )
+
   useEffect(() => {
     let cancelled = false
     findOrphans()
@@ -196,8 +236,74 @@ export default function Home() {
       abortRef.current?.abort()
       managerRef.current?.close()
       reconnectRef.current?.close()
+      void lanSessionRef.current?.stop()
       // Wake Lock manager 由上面的 effect 管理（dispose + 置空 ref）
     }
+  }, [])
+
+  // T05：app 壳内启动局域网发现会话（mDNS 广告+浏览 + 原生信令服务器，ADR-0009）。
+  // 设备列表/通道事件驱动 UI 与 WebRTC 接线；handlers 只依赖 refs 与稳定 setter，首帧闭包安全。
+  useEffect(() => {
+    if (!IS_NATIVE) return
+    const session = new LanDiscoverySession({
+      transport: lanDiscoveryTransport,
+      device: lanAdvertDevice,
+      events: {
+        // 代际守卫：StrictMode 双跑时旧会话的迟到事件（stop 清空列表）不覆盖新会话状态
+        onDevicesChanged: (devices) => {
+          if (lanSessionRef.current !== session) return
+          setLanDevices(devices)
+          // 断线后设备从列表消失 → 重新发现时自动重连（验收 3：重新发现 → 原生重连）
+          const pending = pendingReconnectRef.current
+          if (pending) {
+            if (Date.now() - pending.at > 60_000) {
+              pendingReconnectRef.current = null
+              setLanStatus('未重新发现设备，请手动点选连接')
+            } else if (devices.some((d) => d.id === pending.id)) {
+              const dev = devices.find((d) => d.id === pending.id)!
+              pendingReconnectRef.current = null
+              setLanStatus(`已重新发现 ${dev.name}，自动重连…`)
+              void reconnectLan(dev.id)
+            }
+          }
+        },
+        // 代际守卫：StrictMode 双跑时旧会话的迟到事件（stop 清理）不驱动 UI/WebRTC 握手
+        onPeerConnected: (e) => {
+          if (lanSessionRef.current === session) handleLanPeerConnected(e)
+        },
+        onPeerDisconnected: (id) => {
+          if (lanSessionRef.current === session) handleLanPeerDisconnected(id)
+        },
+        onSignal: (from, payload) => {
+          if (lanSessionRef.current === session) handleLanSignal(from, payload)
+        },
+        onServerChange: (port) => {
+          if (lanSessionRef.current !== session) return
+          setLanPort(port)
+          if (port !== null) setLanStatus(`局域网发现已就绪（信令服务器 :${port}）`)
+        },
+        onPermissionDenied: () => {
+          if (lanSessionRef.current !== session) return
+          setLanError(
+            '本地网络权限被拒：请到 系统设置 → 隐私与安全性 → 本地网络 开启 LocalTransfer 后重启 App',
+          )
+        },
+        onError: (code, message) => {
+          if (lanSessionRef.current !== session) return
+          setLanError(describeLanError(code, message))
+        },
+      },
+    })
+    lanSessionRef.current = session
+    void session.start().then((r) => {
+      if (!r.ok) setLanStatus('局域网发现未启动（见下方错误提示）')
+    })
+    return () => {
+      if (lanConnectTimeoutRef.current) clearTimeout(lanConnectTimeoutRef.current)
+      void session.stop()
+      lanSessionRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // e2e 测试钩子（scripts/e2e.mjs 断线重连用例）：仅 dev 构建暴露，生产无
@@ -348,8 +454,8 @@ export default function Home() {
       setPeers((prev) => (prev.some((p) => p.id === peer.id) ? prev : [...prev, peer])),
     onPeerLeft: (id) => setPeers((prev) => prev.filter((p) => p.id !== id)),
     onSignal: (from, payload) => {
-      if (payload.kind === 'offer') void ensureManager().handleOffer(from, payload)
-      else void ensureManager().handleAnswer(payload)
+      transportRef.current = 'ws' // WS 房间来的 offer/answer → 回复走 WS 通道
+      routeSignal(from, payload, setError)
     },
     onError: (r) => {
       setError(r)
@@ -361,7 +467,27 @@ export default function Home() {
   function ensureManager(): ConnectionManager {
     if (!managerRef.current) {
       managerRef.current = new ConnectionManager(
-        { signal: (to, payload) => reconnectRef.current?.signal(to, payload) },
+        {
+          signal: (to, payload) => {
+            if (transportRef.current === 'lan') {
+              // T05：原生信令通道——SDP 经活跃通道发出（SPEC §5.5）。NOT_CONNECTED /
+              // ALREADY_CONNECTING 是竞态/重连瞬态（通道已被替换或正在建立），静默忽略——
+              // 最终通道由 peerConnected 角色与收到的 offer 驱动收敛（T04 设计定稿）。
+              const session = lanSessionRef.current
+              if (!session) return
+              void session
+                .sendSignal(to, payload)
+                .then((r) => {
+                  if (!r.ok && r.error !== CHANNEL_ERRORS.NOT_CONNECTED && r.error !== CHANNEL_ERRORS.ALREADY_CONNECTING) {
+                    setLanError(r.error ? describeLanError(r.error) : '发送信令失败')
+                  }
+                })
+                .catch((err) => setLanError(err instanceof Error ? err.message : String(err)))
+            } else {
+              reconnectRef.current?.signal(to, payload)
+            }
+          },
+        },
         {
           onState: (s) => setConnState(s),
           onData: (data) => ensureController().handleData(data),
@@ -442,8 +568,18 @@ export default function Home() {
       interruptedRef.current = true
       abortRef.current?.abort() // 停掉当前发送循环（重连后 resumeSend 续传）
       void runDiag()
-      // 信令在线且有对端 → 自动重建 DataChannel（重新 offer）
-      if (wsState === 'connected' && peerIdRef.current) {
+      if (transportRef.current === 'lan' && peerIdRef.current) {
+        const peerId = peerIdRef.current
+        if (lanSessionRef.current?.isConnected(peerId)) {
+          // T05：原生信令通道仍存活（WebRTC 数据面单独失败）→ 直接重建 DataChannel：
+          // 重新 offer 经现有通道发出，同 WS 语义（SPEC §3.3 disconnected → 重新 signal）
+          void ensureManager().reconnectTo(peerId).catch(() => {})
+        } else {
+          // 原生通道也断了 → 重新发现/原生重连 → peerConnected 驱动新 offer → 续传
+          void reconnectLan(peerId)
+        }
+      } else if (wsState === 'connected' && peerIdRef.current) {
+        // 信令在线且有对端 → 自动重建 DataChannel（重新 offer）
         if (connState === 'failed') {
           void ensureManager().reconnectTo(peerIdRef.current).catch(() => {})
         } else {
@@ -459,6 +595,7 @@ export default function Home() {
     } else if (connState === 'connected') {
       if (interruptedRef.current) {
         interruptedRef.current = false
+        lanReconnectAttemptsRef.current = 0
         void resumeAfterReconnect()
       }
     }
@@ -482,6 +619,7 @@ export default function Home() {
   }
 
   async function connectTo(peerId: string) {
+    transportRef.current = 'ws'
     peerIdRef.current = peerId
     setError('')
     // 对端重载/断连后手动重建连接：旧连接可能仍显示 connected（ICE 失败检测有延迟），
@@ -500,6 +638,153 @@ export default function Home() {
 
   function pickFiles() {
     fileInputRef.current?.click()
+  }
+
+  // ── T05 局域网发现接线（ADR-0009，分支 A）：原生信令通道 ↔ ConnectionManager ──
+
+  /** 点选局域网设备：native connect → peerConnected 驱动 offer（本端为 initiator） */
+  async function connectToLanDevice(device: TrackedDevice) {
+    const session = lanSessionRef.current
+    if (!session) return
+    if (session.isConnected(device.id)) {
+      // 通道已连但 WebRTC 数据面未建（断线恢复中）：手动重触发 = 重新 offer（同 WS 语义）
+      if (connStateRef.current !== 'connected') {
+        void ensureManager()
+          .reconnectTo(device.id)
+          .catch((err) => setLanError(err instanceof Error ? err.message : String(err)))
+      }
+      return
+    }
+    transportRef.current = 'lan'
+    peerIdRef.current = device.id
+    setLanError('')
+    setLanConnecting(device.id)
+    // 已有在途发送 → 标记中断 + 取消旧发送循环（新连接建立后自动走 resumeSend 续传，同 WS 语义）
+    if (controllerRef.current?.hasActiveSend()) {
+      interruptedRef.current = true
+      abortRef.current?.abort()
+    }
+    const r = await session.connectTo(device)
+    if (!r.ok) {
+      setLanConnecting((cur) => (cur === device.id ? null : cur))
+      setLanError(r.error ? describeLanError(r.error) : '连接失败')
+      setLanStatus('连接失败，请确认对方在首页后重试')
+      return
+    }
+    // 兑底：native connect 成功但 peerConnected 迟迟不来（对端异常/已离开）→ 提示可重试
+    if (lanConnectTimeoutRef.current) clearTimeout(lanConnectTimeoutRef.current)
+    lanConnectTimeoutRef.current = setTimeout(() => {
+      if (!lanSessionRef.current?.isConnected(device.id)) {
+        setLanConnecting((cur) => (cur === device.id ? null : cur))
+        setLanStatus(`与 ${device.name} 的信令通道未建立（对端可能已离开），可重新点选连接`)
+      }
+    }, 10_000)
+  }
+
+  /**
+   * T05：原生信令通道建立 → 按角色走 WebRTC 握手。
+   * initiator = 幸存连接的发起方（即 offer 方）：创建 offer 经原生通道发出；
+   * receiver = 等对方 offer → handleOffer 回 answer。双发起竞态由原生消解（低 deviceId 胜），
+   * 可能看到 initiator→disconnected→receiver 瞬态——以最终 session 幂等处理（T04 设计定稿）。
+   */
+  function handleLanPeerConnected(e: PeerConnectedEvent) {
+    transportRef.current = 'lan'
+    peerIdRef.current = e.id
+    setLanConnecting((cur) => (cur === e.id ? null : cur))
+    setLanConnectedIds((prev) => new Set(prev).add(e.id))
+    setLanError('')
+    pendingReconnectRef.current = null
+    lanReconnectAttemptsRef.current = 0
+    setLanStatus(
+      `已连接 ${e.id}（${e.role === 'initiator' ? '发起方，正在交换 SDP…' : '接收方，等待对方 offer…'}）`,
+    )
+    if (e.role === 'initiator') {
+      // 我是 offer 方：ConnectionManager 建 offer，signal 路由到原生 sendMessage
+      void ensureManager()
+        .connectTo(e.id)
+        .catch((err) => setLanError(err instanceof Error ? err.message : String(err)))
+    }
+    // receiver：等 messageReceived(offer) → handleLanSignal 回 answer
+  }
+
+  /**
+   * offer/answer 分发（WS 与原生通道共用同一 ConnectionManager 语义，SPEC §3.3）：
+   * offer → 本端为 answer 方自动回 answer；answer → 应用到本端既有 offerer peer。
+   */
+  function routeSignal(from: string, payload: SignalPayload, onError: (m: string) => void): void {
+    if (payload.kind === 'offer') {
+      void ensureManager()
+        .handleOffer(from, payload)
+        .catch((err) => onError(err instanceof Error ? err.message : String(err)))
+    } else {
+      void ensureManager()
+        .handleAnswer(payload)
+        .catch((err) => onError(err instanceof Error ? err.message : String(err)))
+    }
+  }
+
+  /** 原生通道收到 offer/answer → WebRTC 握手（与 WS 路径同一 ConnectionManager / RtcPeer） */
+  function handleLanSignal(from: string, payload: SignalPayload) {
+    transportRef.current = 'lan'
+    peerIdRef.current = from
+    setLanConnecting((cur) => (cur === from ? null : cur))
+    setLanConnectedIds((prev) => new Set(prev).add(from))
+    routeSignal(from, payload, setLanError)
+  }
+
+  /**
+   * T05：原生信令通道断开 → 标记中断 + 走「重新发现 → 原生重连 → 从 bitfield 续传」
+   * （验收 3，§3.4 不变）。TCP 断开是强信号（对端关闭/网络中断）；即使 WebRTC 数据面
+   * 仍短暂存活，重握手 + resumeSend 也只是几秒的代价且零数据损失——不等 ICE 超时（可能
+   * 很久甚至不触发，无 STUN 时 consent 检测不可靠）。
+   */
+  function handleLanPeerDisconnected(id: string) {
+    if (peerIdRef.current !== id) return
+    setLanConnectedIds((prev) => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+    interruptedRef.current = true
+    abortRef.current?.abort() // 停当前发送循环（重连后 resumeSend 续传）
+    setLanStatus(`与 ${id} 的信令通道断开，尝试重新发现并重连…`)
+    void reconnectLan(id)
+  }
+
+  /**
+   * LAN 重连：注册表找设备（重新发现）→ 原生 connect → peerConnected 驱动新 offer →
+   * connState 回到 connected 后 resumeAfterReconnect 自动续传。封顶 3 次转手动。
+   * lanReconnectingRef 防双重触发（peerDisconnected 事件 + connState 效果）。
+   */
+  async function reconnectLan(id: string) {
+    const session = lanSessionRef.current
+    if (!session) return
+    if (lanReconnectingRef.current) return
+    lanReconnectingRef.current = true
+    try {
+      if (lanReconnectAttemptsRef.current >= 3) {
+        setLanStatus('自动重连多次失败，请重新点选设备连接')
+        pendingReconnectRef.current = null
+        return
+      }
+      lanReconnectAttemptsRef.current++
+      const device = session.devices().find((d) => d.id === id)
+      if (!device) {
+        // 设备已从列表消失：等重新发现（onDevicesChanged 里自动重连）
+        pendingReconnectRef.current = { id, at: Date.now() }
+        setLanStatus('设备已消失，等待重新发现后自动重连…')
+        return
+      }
+      const r = await session.connectTo(device)
+      if (!r.ok) {
+        setLanError(r.error ? describeLanError(r.error) : '原生重连失败')
+        pendingReconnectRef.current = { id, at: Date.now() }
+        setLanStatus('原生重连失败，等待重新发现…')
+      }
+      // ok → peerConnected(initiator) 触发新 offer；connected 后由 connState 流程续传
+    } finally {
+      lanReconnectingRef.current = false
+    }
   }
 
   /** 选文件夹：桌面 Chrome/Edge 走 File System Access；其余（iOS 18.4+ / Android）走 webkitdirectory */
@@ -1157,6 +1442,50 @@ export default function Home() {
           ))}
         </ul>
       </section>
+
+      {/* T05：局域网发现区块（app 壳内，ADR-0009）——点选连接 → 原生信令 → WebRTC 数据面；
+          T06 将并入双区块 UI（在线房间/局域网）与可见性开关 */}
+      {IS_NATIVE && (
+        <section className="card">
+          <h2>局域网设备（{lanDevices.length} 台）</h2>
+          <p className="muted">
+            同一 Wi-Fi 下的 LocalTransfer App 自动出现在这里（mDNS 发现 + 原生信令直连，免扫码）。
+          </p>
+          {lanPort !== null && (
+            <p className="muted" style={{ fontSize: 12, margin: '2px 0 6px' }}>
+              信令服务器：:{lanPort}（SRV = TXT 端口）
+            </p>
+          )}
+          {lanStatus && <p>{lanStatus}</p>}
+          {lanError && <p className="bad">{lanError}</p>}
+          {lanDevices.length === 0 ? (
+            <p className="muted">
+              未发现设备：请确认对方也在 LocalTransfer App 首页，且同一 Wi-Fi / 无 AP 隔离（AP 隔离时请用离线扫码配对）。
+            </p>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+              {lanDevices.map((d) => {
+                const connected = lanConnectedIds.has(d.id)
+                const connecting = lanConnecting === d.id
+                return (
+                  <li key={d.id} className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
+                    <span>
+                      <span className="ok" style={{ marginRight: 6 }}>●</span>
+                      {d.name} <span className="muted">({d.kind} · :{d.port})</span>
+                    </span>
+                    <button
+                      onClick={() => void connectToLanDevice(d)}
+                      disabled={connected || connecting || connState === 'signaling' || connState === 'connecting'}
+                    >
+                      {connected ? '已连接' : connecting || connState === 'signaling' || connState === 'connecting' ? '连接中…' : '连接'}
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
+      )}
 
       {/* T07：离线二维码配对（无信令服务时；建连后完全复用在线数据面） */}
       <OfflinePair manager={() => ensureManager()} connState={connState} deviceKind={device.kind} />
