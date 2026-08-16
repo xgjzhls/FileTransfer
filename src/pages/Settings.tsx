@@ -5,6 +5,7 @@ import { findOrphans, formatBytes, getSessionStore, getStorageAdapter } from '..
 import type { OrphanReport } from '../storage'
 import { IS_NATIVE } from '../native/env'
 import { clearLastRoom, getLastRoom } from '../rooms/session'
+import { getLanVisible, setLanVisible as persistLanVisible } from '../lan/visibility'
 
 const DEVICE_NAME_KEY = 'lt.deviceName'
 
@@ -35,6 +36,9 @@ export default function Settings() {
   // T12：记住的房间（设置页「退出房间」入口）
   const [lastRoom, setLastRoom] = useState('')
   const [roomMsg, setRoomMsg] = useState('')
+  // T06：局域网可见性（lt.lanVisible，默认开；关 = 不广告不浏览）
+  const [lanVisible, setLanVisible] = useState(() => getLanVisible())
+  const [lanMsg, setLanMsg] = useState('')
 
   useEffect(() => {
     setName(localStorage.getItem(DEVICE_NAME_KEY) ?? '')
@@ -159,6 +163,17 @@ export default function Settings() {
     setRoomMsg('已退出房间：下次打开首页不会自动加入该房间')
   }
 
+  /** T06：局域网可见性开关 —— 持久化 lt.lanVisible（重启保持）；关 = 不广告不浏览 */
+  function handleLanVisibleChange(visible: boolean) {
+    setLanVisible(visible)
+    persistLanVisible(visible)
+    setLanMsg(
+      visible
+        ? '已开启：本机会出现在他人「局域网发现」列表，并主动发现同网设备（重启保持）'
+        : '已关闭：本机不会出现在他人发现列表、也不主动发现（隐身，重启保持）；传输请走在线房间或扫码配对',
+    )
+  }
+
   return (
     <>
       <h1>设置</h1>
@@ -195,6 +210,30 @@ export default function Settings() {
           <p className="muted">未记住房间：打开首页后输入房间码即可加入，重开应用自动回房。</p>
         )}
         {roomMsg && <p className="ok">{roomMsg}</p>}
+      </section>
+
+      <section className="card">
+        <h2>局域网</h2>
+        <label className="row" style={{ gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={lanVisible}
+            onChange={(e) => handleLanVisibleChange(e.target.checked)}
+          />
+          <span>
+            局域网可见性（<span className={lanVisible ? 'ok' : 'bad'}>{lanVisible ? '开' : '关'}</span>）
+          </span>
+        </label>
+        <p className="muted">
+          开启（默认）：本机通过 mDNS 出现在他人「局域网发现」列表、可被免扫码直连，并主动发现同网设备。
+          关闭：本机不广播也不扫描（完全隐身）——同网设备看不到本机，本机也不主动发现；传输请走在线房间或离线扫码配对。
+        </p>
+        {lanMsg && <p className="ok">{lanMsg}</p>}
+        {IS_NATIVE && !lanVisible && (
+          <p className="bad">
+            ⚠ 当前已关闭：首页「局域网发现」区块将不可用（不启动发现会话）。
+          </p>
+        )}
       </section>
 
       <section className="card">

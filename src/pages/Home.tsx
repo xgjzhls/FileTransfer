@@ -40,6 +40,7 @@ import { CHANNEL_ERRORS, DEFAULT_SIGNALING_PORT } from 'lan-discovery'
 import type { DeviceInfo as LanDeviceInfo, PeerConnectedEvent, TrackedDevice } from 'lan-discovery'
 import { LanDiscoverySession, describeLanError } from '../lan/lanSession'
 import { lanDiscoveryTransport } from '../lan/lanTransport'
+import { getLanVisible } from '../lan/visibility'
 
 /** 信令服务地址（.env 注入，T03 部署；形如 wss://host/ws） */
 const SIGNALING_WSS = import.meta.env.VITE_SIGNALING_WSS ?? ''
@@ -192,6 +193,11 @@ export default function Home() {
   const [lanConnecting, setLanConnecting] = useState<string | null>(null)
   /** 已建立原生信令通道的 peerId（UI「已连接」标记；瞬态幂等） */
   const [lanConnectedIds, setLanConnectedIds] = useState<Set<string>>(new Set())
+  /** T06：局域网可见性（lt.lanVisible，默认开）——关 = 不广告不浏览（会话不启动，隐身语义）
+   *  Home 只读（切换在设置页；路由切换时 Home 重挂载重新读取） */
+  const [lanVisible] = useState<boolean>(() => getLanVisible())
+  /** T06：本地网络权限被拒标记（专属引导区块，优先于普通错误文案渲染） */
+  const [lanPermissionDenied, setLanPermissionDenied] = useState(false)
   const lanSessionRef = useRef<LanDiscoverySession | null>(null)
   /** 当前连接的信令载体：ws = 在线房间；lan = 原生信令通道（SDP 经 TCP） */
   const transportRef = useRef<'ws' | 'lan'>('ws')
@@ -242,6 +248,8 @@ export default function Home() {
   }, [])
 
   // T05：app 壳内启动局域网发现会话（mDNS 广告+浏览 + 原生信令服务器，ADR-0009）。
+  // T06：会话生命周期由可见性开关驱动——lanVisible 关 → 不启动/停止（即不广告不浏览）；
+  // 切换时重建会话（stop/start 幂等），事件闭包取最新可见性。
   // 设备列表/通道事件驱动 UI 与 WebRTC 接线；handlers 只依赖 refs 与稳定 setter，首帧闭包安全。
   useEffect(() => {
     if (!IS_NATIVE) return
@@ -284,9 +292,8 @@ export default function Home() {
         },
         onPermissionDenied: () => {
           if (lanSessionRef.current !== session) return
-          setLanError(
-            '本地网络权限被拒：请到 系统设置 → 隐私与安全性 → 本地网络 开启 LocalTransfer 后重启 App',
-          )
+          setLanPermissionDenied(true)
+          setLanError('') // 权限引导由专属区块承担（lanPermissionDenied 优先渲染）
         },
         onError: (code, message) => {
           if (lanSessionRef.current !== session) return
@@ -295,16 +302,20 @@ export default function Home() {
       },
     })
     lanSessionRef.current = session
-    void session.start().then((r) => {
-      if (!r.ok) setLanStatus('局域网发现未启动（见下方错误提示）')
-    })
+    // T06 可见性门控：关 = 不广告不浏览（会话不启动）；开 = 全量启动（广告 + 浏览 + 信令服务器）
+    if (lanVisible) {
+      void session.start().then((r) => {
+        if (!r.ok) setLanStatus('局域网发现未启动（见下方错误提示）')
+      })
+    }
     return () => {
       if (lanConnectTimeoutRef.current) clearTimeout(lanConnectTimeoutRef.current)
       void session.stop()
       lanSessionRef.current = null
     }
+    // 可见性切换 → 重建会话；依赖 lanVisible（事件闭包需取最新可见性）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [lanVisible])
 
   // e2e 测试钩子（scripts/e2e.mjs 断线重连用例）：仅 dev 构建暴露，生产无
   useEffect(() => {
@@ -759,6 +770,12 @@ export default function Home() {
   async function reconnectLan(id: string) {
     const session = lanSessionRef.current
     if (!session) return
+    if (!lanVisible) {
+      // T06：可见性关闭 = 隐身语义——不主动重连（设备列表也不显示，重新开启后重新发现）
+      setLanStatus('局域网可见性已关闭，未自动重连（可在「设置 → 局域网」重新开启）')
+      pendingReconnectRef.current = null
+      return
+    }
     if (lanReconnectingRef.current) return
     lanReconnectingRef.current = true
     try {
@@ -1318,6 +1335,219 @@ export default function Home() {
     )
   }
 
+  // ── T06：设备双区块（ADR-0009 决策 6 / SPEC §6.1）─────────────────────────────
+  // 「在线房间」（PIN 门控，ADR-0006 语义不变）+「局域网发现」（app 端 mDNS，来源标注）；
+  // 信令不可达（未配置 / 重试耗尽离线 / 尚未建立任何信令会话）→ 离线主场景：局域网区块为主（自动聚焦，区块置前 + 强调）。
+  // 注：无 lastRoom 的完全离线首开（ADR-0007 主场景）从不触发 joinRoom，wsState 停在 idle——
+  // 此时同样判为不可达，否则局域网区块永不聚焦（评审修正）。
+  const signalingDown =
+    !SIGNALING_WSS || wsState === 'offline' || (wsState === 'idle' && room === '')
+
+  /** 「在线房间」区块：PIN 输入 / 状态 / 诊断 / 房间设备列表（ADR-0006 门控不变） */
+  const roomBlock = (
+    <div className="device-block">
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <span className="block-title">
+          在线房间 <span className="badge">{peers.length} 台</span>
+        </span>
+        {signalingDown && (
+          <span className="badge bad">
+            {!SIGNALING_WSS || wsState === 'offline' ? '信令不可达' : '未加入房间'}
+          </span>
+        )}
+      </div>
+      {!SIGNALING_WSS && (
+        <p className="bad">未配置 VITE_SIGNALING_WSS（见 .env.example），信令不可用——请使用下方「离线扫码配对」。</p>
+      )}
+      <div className="row">
+        {room === '' ? (
+          <>
+            <input
+              value={pinInput}
+              onChange={(e) => setPinInput(sanitizePin(e.target.value))}
+              placeholder="输入 4 位房间码（PIN）"
+              maxLength={PIN_LENGTH}
+              style={{ width: 170 }}
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && isValidPin(pinInput)) joinRoom(pinInput)
+              }}
+            />
+            <button onClick={() => void randomPin()} disabled={busy}>
+              随机生成
+            </button>
+          </>
+        ) : (
+          <span className="badge">房间码：{room}</span>
+        )}
+        <span className={`badge ${connState === 'connected' ? 'ok' : ''}`}>状态：{connState}</span>
+      </div>
+      {room === '' && pinInput.length > 0 && pinInput.length < PIN_LENGTH && (
+        <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
+          继续输入至 {PIN_LENGTH} 位自动加入（仅限 2-9 与 A-Z，已自动剔除 0/O、1/I）
+        </p>
+      )}
+      {room !== '' && (
+        <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>
+          退出房间在「设置 → 房间」页（退出后下次打开不再自动回房）。
+        </p>
+      )}
+      {status && <p>{status}</p>}
+      {error && <p className="bad">{error}</p>}
+      {wsState === 'reconnecting' && (
+        <p className="bad">⚠ 信令连接断开，自动重连中（指数退避 1s→30s，最多 10 次）…</p>
+      )}
+      {wsState === 'offline' && (
+        <p className="bad">
+          信令离线：自动回房已放弃。请检查网络 / 信令服务后重试，或使用下方「离线扫码配对」。
+          <button
+            onClick={() => reconnectRef.current?.retry()}
+            style={{ marginLeft: 8, padding: '2px 10px' }}
+          >
+            重新连接
+          </button>
+        </p>
+      )}
+
+      <details style={{ marginTop: 8 }}>
+        <summary className="muted" style={{ cursor: 'pointer' }}>诊断（信令 / 本机候选 IP）</summary>
+        <p className="mono" style={{ fontSize: 12 }}>
+          信令：{WS_STATE_LABEL[wsState]} · {SIGNALING_WSS || '未配置'}
+        </p>
+        <div className="row">
+          <button onClick={() => void runDiag()} style={{ padding: '6px 10px', fontSize: 12 }}>
+            收集本机候选 IP
+          </button>
+        </div>
+        {diagMsg && <p className="muted">{diagMsg}</p>}
+        {diagIps.length > 0 && (
+          <ul className="mono" style={{ fontSize: 12, margin: '6px 0', paddingLeft: 18 }}>
+            {diagIps.map((ip) => (
+              <li key={ip}>{describeCandidateIp(ip)}</li>
+            ))}
+          </ul>
+        )}
+        <p className="muted" style={{ fontSize: 12 }}>
+          mDNS 名（xxx.local）依赖路由器组播解析；198.18.x.x 是 Clash fake-ip。
+        </p>
+      </details>
+
+      {peers.length === 0 && room !== '' && (
+        <p className="muted">等待其他设备输入房间码 {room} 加入…</p>
+      )}
+      {peers.length === 0 && room === '' && (
+        <p className="muted">
+          输入房间码（PIN）或「随机生成」一个码分享给对方，同码设备会出现在这里；重开应用自动回到上次的房间。
+        </p>
+      )}
+      <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+        {peers.map((peer) => (
+          <li key={peer.id} className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
+            <span>
+              <span className="ok" style={{ marginRight: 6 }}>●</span>
+              {peer.name} <span className="muted">({peer.kind} · 在线)</span>
+            </span>
+            <button
+              onClick={() => void connectTo(peer.id)}
+              disabled={
+                wsState !== 'connected' ||
+                connState === 'signaling' ||
+                connState === 'connecting'
+              }
+            >
+              {connState === 'signaling' || connState === 'connecting' ? '连接中…' : '连接'}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+
+  /** 「局域网发现」区块（app 壳内 mDNS；来源标注「局域网」；离线时置前 + 强调） */
+  const lanBlock = IS_NATIVE ? (
+    <div className={`device-block${signalingDown ? ' lan-primary' : ''}`}>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <span className="block-title">
+          局域网发现 <span className="badge">{lanDevices.length} 台</span>
+          <span className="badge ok">局域网</span>
+          {signalingDown && <span className="badge ok">离线主通道</span>}
+        </span>
+      </div>
+      {lanVisible ? (
+        <>
+          {lanPermissionDenied ? (
+            <p className="bad">
+              本地网络权限被拒：请到 系统设置 → 隐私与安全性 → 本地网络 开启 LocalTransfer 后重启 App。
+            </p>
+          ) : (
+            <>
+              {lanError && <p className="bad">{lanError}</p>}
+              {lanStatus && <p>{lanStatus}</p>}
+              {lanPort !== null && (
+                <p className="muted" style={{ fontSize: 12, margin: '2px 0 6px' }}>
+                  信令服务器：:{lanPort}（SRV = TXT 端口）
+                </p>
+              )}
+              {lanDevices.length === 0 ? (
+                lanPort === null ? (
+                  <p className="muted">正在启动局域网发现…（绑定信令服务器 + mDNS 浏览）</p>
+                ) : (
+                  <p className="muted">
+                    正在发现 / 未发现设备：同一 Wi-Fi 下的 LocalTransfer App 会自动出现在这里（mDNS 发现 + 原生信令直连，免扫码）；
+                    请确认对方也在 App 首页，且无 AP 隔离（AP 隔离时 mDNS 不可达，请用「离线扫码配对」）。
+                  </p>
+                )
+              ) : (
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {lanDevices.map((d) => {
+                    const connected = lanConnectedIds.has(d.id)
+                    const connecting = lanConnecting === d.id
+                    return (
+                      <li key={d.id} className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
+                        <span>
+                          <span className="ok" style={{ marginRight: 6 }}>●</span>
+                          {d.name}{' '}
+                          <span className="badge" style={{ padding: '1px 8px', fontSize: 11 }}>局域网</span>{' '}
+                          <span className="muted">({d.kind} · :{d.port})</span>
+                        </span>
+                        <button
+                          onClick={() => void connectToLanDevice(d)}
+                          disabled={connected || connecting || connState === 'signaling' || connState === 'connecting'}
+                        >
+                          {connected ? '已连接' : connecting || connState === 'signaling' || connState === 'connecting' ? '连接中…' : '连接'}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+            </>
+          )}
+        </>
+      ) : (
+        <p className="muted">
+          局域网可见性已关闭：本机不会出现在他人发现列表、也不主动发现。可在「设置 → 局域网」重新开启，
+          或使用在线房间 / 离线扫码配对。
+        </p>
+      )}
+    </div>
+  ) : null
+
+  /** 桌面端：本地服务器连接的设备（T08 接入后显示；无发现能力时不出空误导文案，T06 验收 4） */
+  const desktopBlock = !IS_NATIVE ? (
+    <div className="device-block">
+      <span className="block-title">
+        本地服务器连接的设备 <span className="badge">电脑腿</span>
+      </span>
+      <p className="muted">
+        桌面端浏览器无 mDNS 发现能力：由手机 App 内的本地信令服务器（WSS）接入。此区块将在「电脑腿」接入（T08）后
+        显示已连接的电脑设备；当前请{signalingDown ? '使用下方「离线扫码配对」' : '使用上方「在线房间」或下方「离线扫码配对」'}。
+      </p>
+    </div>
+  ) : null
+
   return (
     <>
       <h1>LocalTransfer</h1>
@@ -1333,159 +1563,22 @@ export default function Home() {
       )}
 
       <section className="card">
-        {/* T11：房间与设备卡片合并为「设备」视图 —— PIN 输入区 + 设备列表 + 点选连接 */}
-        <h2>设备（{peers.length} 台在线）</h2>
-        {!SIGNALING_WSS && (
-          <p className="bad">未配置 VITE_SIGNALING_WSS（见 .env.example），信令不可用——请使用下方「离线扫码配对」。</p>
+        {/* T06：设备双区块（ADR-0009 决策 6 / SPEC §6.1）——在线房间（PIN 门控）+ 局域网发现（来源标注）；
+            信令不可达（未配置 / 重试耗尽离线）时局域网区块为主（自动聚焦）；桌面端显示「本地服务器连接的设备」占位 */}
+        <h2>设备</h2>
+        {signalingDown ? (
+          <>
+            {lanBlock}
+            {roomBlock}
+          </>
+        ) : (
+          <>
+            {roomBlock}
+            {lanBlock}
+          </>
         )}
-        <div className="row">
-          {room === '' ? (
-            <>
-              <input
-                value={pinInput}
-                onChange={(e) => setPinInput(sanitizePin(e.target.value))}
-                placeholder="输入 4 位房间码（PIN）"
-                maxLength={PIN_LENGTH}
-                style={{ width: 170 }}
-                autoCapitalize="characters"
-                autoCorrect="off"
-                spellCheck={false}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && isValidPin(pinInput)) joinRoom(pinInput)
-                }}
-              />
-              <button onClick={() => void randomPin()} disabled={busy}>
-                随机生成
-              </button>
-            </>
-          ) : (
-            <span className="badge">房间码：{room}</span>
-          )}
-          <span className={`badge ${connState === 'connected' ? 'ok' : ''}`}>状态：{connState}</span>
-        </div>
-        {room === '' && pinInput.length > 0 && pinInput.length < PIN_LENGTH && (
-          <p className="muted" style={{ fontSize: 12, margin: '6px 0 0' }}>
-            继续输入至 {PIN_LENGTH} 位自动加入（仅限 2-9 与 A-Z，已自动剔除 0/O、1/I）
-          </p>
-        )}
-        {room !== '' && (
-          <p className="muted" style={{ fontSize: 12, margin: '4px 0 0' }}>
-            退出房间在「设置 → 房间」页（退出后下次打开不再自动回房）。
-          </p>
-        )}
-        {status && <p>{status}</p>}
-        {error && <p className="bad">{error}</p>}
-        {wsState === 'reconnecting' && (
-          <p className="bad">⚠ 信令连接断开，自动重连中（指数退避 1s→30s，最多 10 次）…</p>
-        )}
-        {wsState === 'offline' && (
-          <p className="bad">
-            信令离线：自动回房已放弃。请检查网络 / 信令服务后重试，或使用下方「离线扫码配对」。
-            <button
-              onClick={() => reconnectRef.current?.retry()}
-              style={{ marginLeft: 8, padding: '2px 10px' }}
-            >
-              重新连接
-            </button>
-          </p>
-        )}
-
-        <details style={{ marginTop: 8 }}>
-          <summary className="muted" style={{ cursor: 'pointer' }}>诊断（信令 / 本机候选 IP）</summary>
-          <p className="mono" style={{ fontSize: 12 }}>
-            信令：{WS_STATE_LABEL[wsState]} · {SIGNALING_WSS || '未配置'}
-          </p>
-          <div className="row">
-            <button onClick={() => void runDiag()} style={{ padding: '6px 10px', fontSize: 12 }}>
-              收集本机候选 IP
-            </button>
-          </div>
-          {diagMsg && <p className="muted">{diagMsg}</p>}
-          {diagIps.length > 0 && (
-            <ul className="mono" style={{ fontSize: 12, margin: '6px 0', paddingLeft: 18 }}>
-              {diagIps.map((ip) => (
-                <li key={ip}>{describeCandidateIp(ip)}</li>
-              ))}
-            </ul>
-          )}
-          <p className="muted" style={{ fontSize: 12 }}>
-            mDNS 名（xxx.local）依赖路由器组播解析；198.18.x.x 是 Clash fake-ip。
-          </p>
-        </details>
-
-        {peers.length === 0 && room !== '' && (
-          <p className="muted">等待其他设备输入房间码 {room} 加入…</p>
-        )}
-        {peers.length === 0 && room === '' && (
-          <p className="muted">
-            输入房间码（PIN）或「随机生成」一个码分享给对方，同码设备会出现在这里；重开应用自动回到上次的房间。
-          </p>
-        )}
-        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-          {peers.map((peer) => (
-            <li key={peer.id} className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
-              <span>
-                <span className="ok" style={{ marginRight: 6 }}>●</span>
-                {peer.name} <span className="muted">({peer.kind} · 在线)</span>
-              </span>
-              <button
-                onClick={() => void connectTo(peer.id)}
-                disabled={
-                  wsState !== 'connected' ||
-                  connState === 'signaling' ||
-                  connState === 'connecting'
-                }
-              >
-                {connState === 'signaling' || connState === 'connecting' ? '连接中…' : '连接'}
-              </button>
-            </li>
-          ))}
-        </ul>
+        {desktopBlock}
       </section>
-
-      {/* T05：局域网发现区块（app 壳内，ADR-0009）——点选连接 → 原生信令 → WebRTC 数据面；
-          T06 将并入双区块 UI（在线房间/局域网）与可见性开关 */}
-      {IS_NATIVE && (
-        <section className="card">
-          <h2>局域网设备（{lanDevices.length} 台）</h2>
-          <p className="muted">
-            同一 Wi-Fi 下的 LocalTransfer App 自动出现在这里（mDNS 发现 + 原生信令直连，免扫码）。
-          </p>
-          {lanPort !== null && (
-            <p className="muted" style={{ fontSize: 12, margin: '2px 0 6px' }}>
-              信令服务器：:{lanPort}（SRV = TXT 端口）
-            </p>
-          )}
-          {lanStatus && <p>{lanStatus}</p>}
-          {lanError && <p className="bad">{lanError}</p>}
-          {lanDevices.length === 0 ? (
-            <p className="muted">
-              未发现设备：请确认对方也在 LocalTransfer App 首页，且同一 Wi-Fi / 无 AP 隔离（AP 隔离时请用离线扫码配对）。
-            </p>
-          ) : (
-            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-              {lanDevices.map((d) => {
-                const connected = lanConnectedIds.has(d.id)
-                const connecting = lanConnecting === d.id
-                return (
-                  <li key={d.id} className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
-                    <span>
-                      <span className="ok" style={{ marginRight: 6 }}>●</span>
-                      {d.name} <span className="muted">({d.kind} · :{d.port})</span>
-                    </span>
-                    <button
-                      onClick={() => void connectToLanDevice(d)}
-                      disabled={connected || connecting || connState === 'signaling' || connState === 'connecting'}
-                    >
-                      {connected ? '已连接' : connecting || connState === 'signaling' || connState === 'connecting' ? '连接中…' : '连接'}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-        </section>
-      )}
 
       {/* T07：离线二维码配对（无信令服务时；建连后完全复用在线数据面） */}
       <OfflinePair manager={() => ensureManager()} connState={connState} deviceKind={device.kind} />
