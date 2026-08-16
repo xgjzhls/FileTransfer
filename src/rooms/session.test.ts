@@ -38,6 +38,16 @@ describe('session — 房间会话持久化（T12，SPEC §5.4 / ADR-0006）', (
       storage.setItem('lt.deviceId', 'persisted-id-123')
       expect(getOrCreateDeviceId(storage)).toBe('persisted-id-123')
     })
+
+    it('默认存储用 sessionStorage（多标签页身份隔离，防服务端互踢振荡）', () => {
+      // 模拟浏览器两个标签页各一份独立存储（localStorage 共享 / sessionStorage 隔离）
+      const tabA = memoryStorage()
+      const tabB = memoryStorage()
+      const a1 = getOrCreateDeviceId(tabA)
+      const b1 = getOrCreateDeviceId(tabB)
+      expect(a1).not.toBe(b1) // 不同标签页不同身份
+      expect(getOrCreateDeviceId(tabA)).toBe(a1) // 同标签页重载身份不变
+    })
   })
 
   describe('lt.lastRoom（记住上次房间）', () => {
