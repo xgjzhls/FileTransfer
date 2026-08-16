@@ -18,7 +18,11 @@ import {
 } from './capacity'
 import type { CapacityResult, CapacityVerdict } from './capacity'
 
-/** 探测步进：64 MiB（spike 实测写速下可接受）；上限 2 GiB（大文件无法精确预检时提示） */
+/**
+ * 探测步进 64 MiB（spike 实测写速下可接受）。
+ * PROBE_CAP_BYTES 仅封顶「预检写盘」本身（省时：为超大文件全量写盘预检反而慢），
+ * 不是传输大小上限——目标超出封顶时按「已验证至少 X 可写」提示，从不阻断接收。
+ */
 export const PROBE_STEP_BYTES = 64 * 1024 * 1024
 export const PROBE_CAP_BYTES = 2 * 1024 * 1024 * 1024
 

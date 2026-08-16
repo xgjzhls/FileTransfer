@@ -15,7 +15,7 @@ import { classifyExport, guessMime } from '../transfer/export'
 import { CHUNK_SIZE } from '../transfer/sender'
 import { walkDirectory, filesFromWebkitDirectory, basename } from '../transfer/dirPicker'
 import type { PickedDirFile } from '../transfer/dirPicker'
-import { groupTopLevel, shareNames, sumBytes, uniqueZipPaths, disambiguateRootVsDir, ZIP_TOTAL_GUARD_BYTES } from '../transfer/folderExport'
+import { groupTopLevel, shareNames, sumBytes, uniqueZipPaths, disambiguateRootVsDir } from '../transfer/folderExport'
 import type { FolderGroup } from '../transfer/folderExport'
 import { buildZip, ZIP_MIME } from '../transfer/zip'
 import type { ZipEntry } from '../transfer/zip'
@@ -687,10 +687,6 @@ export default function Home() {
    * 激活已失效，会抛 NotAllowedError（权限不足）。分享抛权限类错误同样降级下载。
    */
   async function exportFolderZip(group: FolderGroup<RecvItem>) {
-    if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
-      setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB 打包上限，请分批或逐文件导出`)
-      return
-    }
     setExportMsg(`正在压缩 ${group.dir || '全部文件'}/ 为 zip…`)
     try {
       const paths = uniqueZipPaths(group.items)
@@ -734,10 +730,6 @@ export default function Home() {
       setExportMsg('此浏览器不支持选目标文件夹（需桌面 Chrome/Edge）；可用「导出 zip」后经「文件」App 选位置')
       return
     }
-    if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
-      setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB，请分批或逐文件导出`)
-      return
-    }
     setExportMsg('选择目标文件夹…')
     try {
       const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
@@ -756,10 +748,6 @@ export default function Home() {
 
   /** 文件夹批量分享：全部文件一次进分享面板（iOS 收进目标文件夹，子目录拍平） */
   async function exportFolderShare(group: FolderGroup<RecvItem>) {
-    if (group.totalBytes > ZIP_TOTAL_GUARD_BYTES) {
-      setExportMsg(`文件夹共 ${formatBytes(group.totalBytes)}，超过 1GiB，请分批或逐文件导出`)
-      return
-    }
     setExportMsg('正在拼接文件…')
     try {
       const names = shareNames(group.items)
@@ -783,19 +771,9 @@ export default function Home() {
 
   const orphanCount = orphans?.orphans.length ?? 0
 
-  // T20：勾选总大小守卫（与分组导出文案对齐）
-  function guardSelectedBytes(totalBytes: number): boolean {
-    if (totalBytes > ZIP_TOTAL_GUARD_BYTES) {
-      setExportMsg(`选中内容共 ${formatBytes(totalBytes)}，超过 1GiB 打包上限，请分批或逐文件导出`)
-      return true
-    }
-    return false
-  }
-
   /** T20：导出选中 zip（跨组打包，deflate level 6；分享/下载路由同分组 zip） */
   async function exportSelectedZip() {
     if (selectedItems.length === 0) return
-    if (guardSelectedBytes(sumBytes(selectedItems))) return
     setExportMsg(`正在压缩选中文件为 zip…`)
     try {
       // 跨组勾选：目录优先消歧（根散文件撞目录名）+ 同全路径去重（T20 评审修正）
@@ -838,7 +816,6 @@ export default function Home() {
       setExportMsg('此浏览器不支持选目标文件夹（需桌面 Chrome/Edge）；可用「导出选中 zip」后经「文件」App 选位置')
       return
     }
-    if (guardSelectedBytes(sumBytes(selectedItems))) return
     setExportMsg('选择目标文件夹…')
     try {
       const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' })
@@ -859,7 +836,6 @@ export default function Home() {
   /** T20：批量分享选中（手机；子目录拍平，shareNames 消歧） */
   async function exportSelectedShare() {
     if (selectedItems.length === 0) return
-    if (guardSelectedBytes(sumBytes(selectedItems))) return
     setExportMsg('正在拼接文件…')
     try {
       const names = shareNames(selectedItems)

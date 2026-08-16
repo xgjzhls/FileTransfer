@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { groupTopLevel, shareNames, uniqueZipPaths, ZIP_TOTAL_GUARD_BYTES, sumBytes, disambiguateRootVsDir } from './folderExport'
+import { groupTopLevel, shareNames, uniqueZipPaths, sumBytes, disambiguateRootVsDir } from './folderExport'
 import type { FolderExportItem } from './folderExport'
 
 const item = (name: string, size = 1): FolderExportItem => ({ name, size })
@@ -118,13 +118,7 @@ describe('uniqueZipPaths — zip/目录导出重名去重', () => {
   })
 })
 
-describe('ZIP_TOTAL_GUARD_BYTES — 导出守卫常量', () => {
-  it('1 GiB', () => {
-    expect(ZIP_TOTAL_GUARD_BYTES).toBe(1024 * 1024 * 1024)
-  })
-})
-
-describe('sumBytes — 勾选条目总大小（T20 批量导出守卫）', () => {
+describe('sumBytes — 勾选条目总大小（T20 批量导出）', () => {
   it('累加 size', () => {
     expect(sumBytes([item('a.txt', 100), item('b.txt', 50), item('c.txt', 0)])).toBe(150)
   })

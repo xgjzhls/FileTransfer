@@ -93,7 +93,7 @@ describe('checkIncomingCapacity — 编排策略', () => {
       runProbe: async () => ({ availableBytes: PROBE_CAP_BYTES, probeCapBytes: PROBE_CAP_BYTES }),
     })
     expect(r.ok).toBe(true)
-    expect(r.message).toContain('无法精确预检')
+    expect(r.message).toContain('不设大小上限')
   })
 
   it('target ≤ 0（空清单）：跳过检查，直接 ok', async () => {

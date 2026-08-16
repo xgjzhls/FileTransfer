@@ -11,13 +11,12 @@
  * T20 补充：跨组勾选导出（复选框多选）复用本模块的 uniqueZipPaths / shareNames，
  * 并用 disambiguateRootVsDir 处理「根散文件名 vs 目录名」冲突。
  *
- * 内存守卫：zip/批量分享都要把组内全部文件读入内存，超限提示分批/逐文件。
+ * 大小策略（T22）：导出不设大小上限。zip/批量分享需整组读入内存，超大导出在
+ * iOS 可能内存不足导致本次导出失败（已收数据不丢，可分批重试）；导出到文件夹
+ * （FSA）逐文件写盘，无内存风险。
  */
 
 import { basename } from '../storage/path'
-
-/** zip / 批量分享的组总大小上限（读入内存 + Blob 组装，iOS 内存敏感） */
-export const ZIP_TOTAL_GUARD_BYTES = 1024 * 1024 * 1024 // 1 GiB
 
 /** 条目总大小（T20 跨组勾选导出的守卫计算；group.totalBytes 为分组预计算版本） */
 export function sumBytes<T extends FolderExportItem>(items: T[]): number {

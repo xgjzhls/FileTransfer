@@ -90,8 +90,8 @@ export async function probeAvailable(
  * 容量结论判定：
  * - estimate 可靠：available ≥ target → ok；否则 not ok。
  * - probe：探测到目标全部可写 → ok；目标 ≤ 探测上限且不足 → not ok
- *   （失败点即真实上限）；目标超出探测上限 → ok 但提示无法精确预检
- *   （大文件，运行时 QuotaExceededError 由续传兜底）。
+ *   （失败点即真实上限）；目标超出探测上限 → ok 但提示「已验证至少 X 可写」
+ *   （探测封顶是省时设计，非传输大小上限；运行时 QuotaExceededError 由续传兜底）。
  * - unavailable：不阻断，提示无法预检。
  */
 export function interpretCapacity(targetBytes: number, cap: CapacityResult): CapacityVerdict {
@@ -116,7 +116,7 @@ export function interpretCapacity(targetBytes: number, cap: CapacityResult): Cap
     return {
       ok: true,
       level: 'info',
-      message: `已验证至少 ${fmtBytes(cap.availableBytes)} 可写；目标 ${fmtBytes(targetBytes)} 更大，iOS 限制无法精确预检（建议确保设备剩余空间充足；中断后可续传）`,
+      message: `空间预检通过（已验证至少 ${fmtBytes(cap.availableBytes)} 可写；预检为省时未写满全量）。传输本身不设大小上限；若中途空间不足会自动续传，已收数据不丢`,
     }
   }
   return {

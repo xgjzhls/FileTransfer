@@ -186,7 +186,7 @@ describe('interpretCapacity — 判定与文案', () => {
     expect(r.ok).toBe(true)
     expect(r.level).toBe('info')
     expect(r.message).toContain('2.00 GB')
-    expect(r.message).toContain('无法精确预检')
+    expect(r.message).toContain('不设大小上限')
   })
 
   it('目标超出探测上限但探测在上限内失败：warn（失败点精确）', () => {
