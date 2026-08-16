@@ -34,6 +34,7 @@
 - SW：vite-plugin-pwa injectManifest（`public/sw.ts` → dist/sw.js，预缓存全部资源 + spike 流式逻辑）
 - 注意：早期试过 Actions workflow + deploy-pages，因 `github-pages` 环境的 branch_policy 拦截失败，已弃用；正式版可回归 Actions 模式（需先改环境策略）
 - **iOS app 壳（ADR-0008）**：根级 Capacitor 工程（`capacitor.config.ts` + `ios/`，SPM 模式）；`npm run build:app`（LT_APP_BUILD=1 禁用 SW 注入）→ `npx cap sync ios` → `bash scripts/ios-deploy.sh`（xcodebuild + devicectl 一键安装启动真机）；插件 `plugins/folder-export`（pickFolder/mkdir/writeChunk/abort/writeTemp）经 SPM 自动链接注册（cap sync 扫描 packageClassList），无需手改原生工程；构建产物随包（离线语义 = 本地资源）
+- **线上信令（workers.dev）**：`cd server && npx wrangler deploy`；**server/ 代码改动必须重新 deploy**（2026-08-16 事故：T10 presence 持久化 8-14 提交但线上 worker 停留在 8-13 部署 → DO evict 后无恢复 → 联调报「join first」）
 
 ## 架构决策记录
 - [ADR-0001](decisions/adr/0001-browser-webrtc-no-native-apps.md)：浏览器 + WebRTC，零原生应用
