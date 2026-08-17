@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第 8 课 · STUN 与 TURN 字节级解剖 | LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>STUN 与 TURN：从概念到字节</h1>
+<p class="subtitle">第 8 课 · 第 6 课把 TURN 讲到了机制层；这一课下探到线格式：亲手构造 STUN Binding Request 问出你的公网地址，再亲手完成一次 TURN Allocate 的完整认证舞蹈。配套代码在 <code>demos/0008/</code>，全部零依赖可运行。</p>
+
+<div class="note">🎯 <strong>本课实得收获</strong>：运行两个 demo，亲眼看到 ① 你的公网地址是怎么被一枚 20 字节的报文问出来的；② TURN 认证的 401 → 带凭据重发 → 拿到中继地址，三个字节级陷阱（对齐、class 位、MI/FP 的长度顺序）你都会踩过并弄懂。学完你再看 <code>iceServers</code> 配置，会知道浏览器在你背后干了什么。</div>
+
+<h2>为什么是这一课</h2>
+
+<p>第 3 课说过「STUN 服务器是一面镜子」，第 6 课说过「Allocate 分配中继地址」——但镜子和分配在线上长什么样，还没见过。你的 LocalTransfer 未来要跨网 P2P，第一件要做的就是把 <code>iceServers</code> 从 <code>[]</code> 换成带 STUN/TURN 的配置。到那时，能看懂 <code>chrome://webrtc-internals</code> 里每一枚候选、每一条检查，和「加个配置就完事」，是两种完全不同的调试能力。</p>
+
+<p>好消息是：STUN 是 WebRTC 里最简单的协议——请求加响应一共 32 字节（本课 demo 实测）。坏消息是：这 32 字节里藏着足够多的坑，够你踩一个下午。我们先看格式，再亲手踩。</p>
+
+<h2>STUN 报文：20 字节头 + TLV 属性</h2>
+
+<p>RFC 8489 §6 规定 STUN 消息由 <strong>20 字节头</strong> 和若干个 <strong>TLV 属性</strong> 组成：</p>
+
+<pre> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|0 0|     MESSAGE TYPE          |       MESSAGE LENGTH          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         MAGIC COOKIE = 0x2112A442             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    TRANSACTION ID (12 bytes)                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</pre>
+
+<ul>
+  <li><strong>TYPE</strong>：方法 + 类。Binding 请求 = <code>0x0001</code>，成功响应 = <code>0x0101</code>，错误响应 = <code>0x0111</code>。</li>
+  <li><strong>LENGTH</strong>：<b>不含头</b>的字节数。属性按 4 字节对齐 → 末 2 位恒为 0。</li>
+  <li><strong>MAGIC COOKIE</strong>：固定值，用于区分 STUN 与其它协议（比如与 DTLS 共用端口时）。</li>
+  <li><strong>TRANSACTION ID</strong>：96-bit 随机数。服务器<b>原样回传</b>——这是你认出「哪次请求的响应」的唯一线索。</li>
+</ul>
+
+<p>这 20 字节就是我们 demo 1 的全部家当：Binding Request 不需要任何属性，裸头就能发。下面是我在这台机器上徒手构造并发出、再从 <code>stun.cloudflare.com:3478</code> 收回的完整对话（<code>demos/0008/stun-client.js</code>）：</p>
+
+<pre>▶ 向 stun.cloudflare.com:3478 发送 Binding Request（20 字节）
+
+  0  00 01 00 00 21 12 a4 42 32 24 86 fc 22 c0 79 8e
+ 16  79 0e 42 92
+
+   类型=0x0001  长度=0  魔数=0x2112a442  事务ID=322486fc22c0798e790e4292
+
+◀ 收到响应（32 字节）
+
+  0  01 01 00 0c 21 12 a4 42 32 24 86 fc 22 c0 79 8e
+ 16  79 0e 42 92 00 20 00 08 00 01 f4 48 4e e1 de 3a
+
+属性:
+  0x0020 XOR-MAPPED-ADDRESS  0001f4484ee1de3a  →  111.243.122.120:54618
+
+✅ 你的公网地址（XOR-MAPPED-ADDRESS）= 111.243.122.120:54618</pre>
+
+<p>一行行对：响应的头 4 字节 <code>01 01 00 0c</code> = 类型 0x0101（Binding 成功）+ 长度 12（只有一个属性）；魔数与事务 ID 与请求<b>完全一致</b>（服务器回显）；然后是一个属性：<code>00 20</code> = XOR-MAPPED-ADDRESS（0x0020），<code>00 08</code> = 值长 8 字节，值 <code>00 01 f4 48 4e e1 de 3a</code>：</p>
+
+<ul>
+  <li><code>00</code> 保留字节；<code>01</code> family = IPv4</li>
+  <li><code>f4 48</code> = X-Port，真端口 = 0xf448 <b>XOR</b> 0x2112 = <code>54618</code></li>
+  <li><code>4e e1 de 3a</code> = X-Address，真 IP = 0x4ee1de3a <b>XOR</b> 0x2112a442 = <code>111.243.122.120</code></li>
+</ul>
+
+<p>为什么 XOR？RFC 5389 记录了部署教训：某些 NAT 会改写载荷里的二进制 IP 字段，XOR 之后「改写即破坏」，反而能发现并忽略。这也是「镜子」的全部技术含量——<b>服务器做的事就是把收到的源地址 XOR 回去</b>。</p>
+
+<h3>Demo 1：亲手问一次</h3>
+
+<p>跑起来（需要能出公网）：</p>
+
+<pre><code>cd demos/0008
+node stun-client.js                  # 默认 stun.cloudflare.com:3478
+node stun-client.js stun.l.google.com 19302</code></pre>
+
+<p>构造的核心代码只有这些（完整版见 <code>demos/0008/stun-client.js</code>）：</p>
+
+<pre><code>function buildBindingRequest() {
+  const txid = crypto.randomBytes(12);      // 96-bit 事务 ID，必须随机
+  const msg = Buffer.alloc(20);
+  msg.writeUInt16BE(0x0001, 0);             // 类型：Binding 请求
+  msg.writeUInt16BE(0, 2);                  // 长度：无属性 → 0
+  msg.writeUInt32BE(0x2112a442, 4);         // 魔数
+  txid.copy(msg, 8);                        // 事务 ID
+  return msg;
+}</code></pre>
+
+<p>注意输出里那个提示：<em>「这个地址只对那个 STUN 服务器有效」</em>。第 3 课讲的对称 NAT 现在有了活证据——向不同目的地发，NAT 给的是不同端口。你也可以连跑三个不同服务器对比：IP 相同、端口各异。</p>
+
+<h3>Demo 2：镜子本尊，60 行</h3>
+
+<p><code>demos/0008/stun-server.js</code> 是一个完整可用的迷你 STUN 服务器（约 60 行）。它的核心：读到请求后，把 <code>rinfo.address:rinfo.port</code>（源地址）按 XOR 规则塞进 XOR-MAPPED-ADDRESS 回发。跑起来用 demo 1 连它：</p>
+
+<pre><code>node stun-server.js 3478             # 终端 A
+node stun-client.js 127.0.0.1 3478   # 终端 B</code></pre>
+
+<p>生产 STUN 服务器（coturn）比它多的只是多租户、配额、NAT 行为探测——「照镜子」本身没有魔法。记住这一点，后面理解 TURN 会顺很多。</p>
+
+<h2>TURN 认证：401 舞蹈</h2>
+
+<p>第 6 课说过 Allocate 要先认证。认证用的是 <a href="https://www.rfc-editor.org/rfc/rfc8489.txt">RFC 8489</a> §9.2 的 <strong>长期凭据（Long-Term Credential）</strong>，流程是三次握手式的挑战—应答：</p>
+
+<pre>客户端                                          coturn
+  │  Allocate（只带 REQUESTED-TRANSPORT=UDP）   │
+  ├────────────────────────────────────────────▶│
+  │  401 Unauthorized：REALM + NONCE            │
+  │◀────────────────────────────────────────────┤
+  │  key = MD5(用户名:域:密码)                  │
+  │  Allocate：USERNAME + REALM + NONCE        │
+  │            + MESSAGE-INTEGRITY(HMAC-SHA1)   │
+  │            + FINGERPRINT(CRC-32)            │
+  ├────────────────────────────────────────────▶│
+  │  0x0103 成功                                │
+  │  XOR-RELAYED-ADDRESS（中继地址）             │
+  │  XOR-MAPPED-ADDRESS（服务器看到的你）        │
+  │  LIFETIME=600                               │
+  │◀────────────────────────────────────────────┤</pre>
+
+<p>两个关键公式（RFC 8489 §9.2.2 / §14.5）：</p>
+
+<pre><code>key = MD5(username ":" realm ":" password)          // 16 字节
+MESSAGE-INTEGRITY = HMAC-SHA1(key) over 消息        // 20 字节
+FINGERPRINT = CRC-32(消息) ^ 0x5354554E             // 4 字节</code></pre>
+
+<p>NONCE 的作用：服务器每次挑战给新值，防重放；客户端重发时必须原样带回。REALM 的作用：告诉客户端该用哪个域的密码——同一服务器可以挂多个域。</p>
+
+<h3>Demo 3：亲手完成一次 Allocate</h3>
+
+<p>起一个本地 coturn（Docker Desktop 的 <code>--network=host</code> 连不上宿主机回环，用端口映射，见 <code>demos/0008/README.md</code>）：</p>
+
+<pre><code>docker run -d --rm --name coturn-demo \
+  -p 3478:3478/udp -p 49160-49200:49160-49200/udp \
+  coturn/coturn \
+  -n --log-file=stdout \
+  --lt-cred-mech --realm=example.org \
+  --user=alice:secret123 --fingerprint \
+  --min-port=49160 --max-port=49200
+
+cd demos/0008
+node turn-allocate.js alice secret123 example.org 127.0.0.1 3478</code></pre>
+
+<p>我实测的输出（<code>demos/0008/turn-allocate.js</code>，约 200 行，徒手实现了全部报文构造）：</p>
+
+<pre>▶ [Allocate(无凭据)] 发送 28 字节 → 127.0.0.1:3478
+◀ [401] 服务器要求认证：realm="example.org" nonce="6a827ebc…"
+  key = MD5("alice:example.org:secret123") = 6fb86950cc2417b45689c7a0eb523ce7
+  （把 USERNAME/REALM/NONCE/MESSAGE-INTEGRITY 加进报文重发…）
+
+▶ [Allocate(带凭据)] 发送 116 字节 → 127.0.0.1:3478
+
+✅ Allocate 成功！
+  XOR-RELAYED-ADDRESS = 172.17.0.2:49193   ← 你的中继地址（relay 候选）
+  XOR-MAPPED-ADDRESS  = 192.168.65.1:47468 ← 服务器看到的你（顺便兼职 STUN）
+  LIFETIME            = 600 秒（默认 10 分钟，到期前要 Refresh）</pre>
+
+<p>注意 <code>XOR-MAPPED-ADDRESS</code> 也在成功响应里——第 6 课说过「一个 TURN 服务器同时覆盖 STUN 的活」，这里就是铁证：Allocate 成功时服务器顺手告诉你它看到的你的公网地址。</p>
+
+<h2>三个字节级陷阱（都是真踩出来的）</h2>
+
+<p>写这个 demo 时我修了三个 bug，每一个都是协议细节，每一个都值得变成你肌肉记忆的一部分：</p>
+
+<div class="key-insight">
+  <span class="label">陷阱一：属性值必须补零到 4 字节对齐</span>
+  <p>TLV 的 LENGTH 只计值本身，但线上每个属性要占满 4 的倍数。第一批报文里 <code>USERNAME="alice"</code>（5 字节）没补位，后面的 REALM、NONCE 全部错位——coturn 读到的用户名是乱字节，401 拒绝。补位公式：<code>pad = (4 - (len % 4)) % 4</code>。补的零不算长度，但<b>在线上存在</b>，也<b>参与 HMAC 计算</b>。</p>
+</div>
+
+<div class="key-insight">
+  <span class="label">陷阱二：class 位插在 method 位中间</span>
+  <p>我最初按「高 2 位是 class」提取，把 0x0113（Allocate 401）解析成了请求。实际是 C1 = <b>bit 8</b>、C0 = <b>bit 4</b>，与 method 位交错（RFC 5389 自己都写「unfortunate encoding」——历史包袱：早期没为 indication/success/error 预留位）。提取：<code>method = (type&amp;0x000f) | ((type&amp;0x00e0)&gt;&gt;1) | ((type&amp;0x3e00)&gt;&gt;2)</code>。</p>
+</div>
+
+<div class="key-insight">
+  <span class="label">陷阱三：算 HMAC 时长度字段不含 FINGERPRINT</span>
+  <p>我先把「最终长度（含 FP）」写进头部再算 HMAC，结果 coturn 校验时把长度字段临时改回「到 MI 结束」再算——两边输入不同，永远 401。正确顺序：① 长度字段先只算到 MI；② 算 HMAC；③ 追加 FINGERPRINT；④ 把长度字段更新为含 FP 的最终值；⑤ 用这个最终长度算 FP 的 CRC（CRC 覆盖到 FP 属性之前）。两段长度，两个时点，缺一不可。</p>
+</div>
+
+<p>顺带一提：<code>turn-allocate.js</code> 里留了一个 <code>verifyMessage()</code>——发出去之前先把报文按 coturn 的校验逻辑自查一遍（MI、FP 都重算对比）。这是协议开发的实用习惯：<b>先自证，再怪服务器</b>。</p>
+
+<h2>对号入座：你的 LocalTransfer</h2>
+
+<p>现在把 <code>iceServers</code> 从 <code>[]</code> 改成：</p>
+
+<pre><code>new RTCPeerConnection({
+  iceServers: [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'turn:turn.example.org:3478', username: '…', credential: '…' },
+  ],
+})</code></pre>
+
+<p>浏览器会为你自动完成今天徒手做的所有事：收集阶段发 Binding Request 拿 srflx 候选（第 4 课）、连通性检查也是发 STUN 消息（<a href="https://www.rfc-editor.org/rfc/rfc8445.txt">RFC 8445</a> 里检查用的就是带 PRIORITY=0x0024 / USE-CANDIDATE=0x0025 属性的 Binding Request）、打洞失败时走 TURN Allocate 拿 relay 候选。你不需要写这些代码——但你现在能看懂它们，还能用 <code>demos/0008</code> 在纯 Node 环境里复现和调试任何一环。</p>
+
+<p>回到第 6 课的成本账：今天 demo 里那个 <code>172.17.0.2:49193</code> 中继地址，对端每发一个字节，coturn 都要收下再转出。生产上统计 <code>selectedCandidatePair.remote.type === 'relay'</code> 的占比，就是你 TURN 带宽账单的预报器。</p>
+
+<h2>练习：拼装一次认证 Allocate</h2>
+
+<div class="order" data-order="补零对齐各属性,长度字段暂不含指纹,算HMAC写到MI属性,追加指纹并更新长度,按最终长度算CRC">
+  <p class="q">按正确顺序点选（从最先做的事开始）：</p>
+  <div class="pile">
+    <button data-key="算HMAC写到MI属性">算 HMAC 写到 MI 属性</button>
+    <button data-key="追加指纹并更新长度">追加指纹并更新长度</button>
+    <button data-key="按最终长度算CRC">按最终长度算 CRC</button>
+    <button data-key="补零对齐各属性">补零对齐各属性</button>
+    <button data-key="长度字段暂不含指纹">长度字段暂不含指纹</button>
+  </div>
+  <div class="build"></div>
+  <p class="feedback"></p>
+</div>
+
+<h2>测验</h2>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q1. STUN Binding Request 的 type 字段值是什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。方法 Binding(0x001) + 类 请求(0b00) → 0x0001。响应才是 0x0101。">0x0001 即请求类</li>
+    <li data-feedback="不对。0x0101 是 Binding 成功响应（C1 位=1）。">0x0101 即成功类</li>
+    <li data-feedback="不对。0x0111 是 Binding 错误响应（C1、C0 都=1），认证失败时才出现。">0x0111 即错误类</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q2. STUN 属性值为什么要补零到 4 字节对齐？</p>
+  <ol class="options">
+    <li data-feedback="正确。解析器按对齐步进读属性；不对齐则后续属性全部错位，认证必败。">补零保证属性正确对齐</li>
+    <li data-feedback="不对。补位反而多占字节；对齐是为了解析，不是省体积。">补零压缩报文传输体积</li>
+    <li data-feedback="不对。长度字段本来就明写值的长度，补位不参与保密。">补零隐藏属性真实长度</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q3. TURN 长期凭据的 HMAC 密钥怎么算？</p>
+  <ol class="options">
+    <li data-feedback="正确。key = MD5(username:realm:password)，16 字节，顺序不能换。">MD5 拼用户域密码</li>
+    <li data-feedback="不对。用的是 MD5 不是 SHA1（SHA1 只用于 HMAC 本体的摘要）。">SHA1 拼用户域密码</li>
+    <li data-feedback="不对。字段顺序是 用户:域:密码，调换顺序算出的密钥就不匹配。">MD5 拼密码域用户</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<div class="quiz" data-answer="0">
+  <p class="q">Q4. Allocate 认证成功后，服务器回的关键信息是什么？</p>
+  <ol class="options">
+    <li data-feedback="正确。XOR-RELAYED-ADDRESS（中继地址）+ LIFETIME（寿命，默认 600 秒）。">中继地址与寿命信息</li>
+    <li data-feedback="不对。对端地址是 Send/Data 指示里带的，不在 Allocate 成功响应里。">对端地址与通道编号</li>
+    <li data-feedback="不对。用户名/密码摘要只用于认证阶段，成功响应里不再回。">用户名与密码摘要值</li>
+  </ol>
+  <p class="feedback"></p>
+</div>
+
+<h2>推荐阅读（主来源）</h2>
+<p>读 <a href="https://www.rfc-editor.org/rfc/rfc8489.txt">RFC 8489</a> 第 6 节（报文格式，含 type 位图）与第 9.2 节（长期凭据）——约 20 分钟，配合本课的 hex dump 逐行对照。再读 <a href="https://www.rfc-editor.org/rfc/rfc8656.txt">RFC 8656</a> 第 4–5 节（Allocate 与认证流程的完整报文例子，第 6 课引的 5766 是它的前身）。线格式速查表在 <a href="../reference/stun-turn-wire-format.html">reference/stun-turn-wire-format.html</a>。</p>
+
+<h2>真实世界任务（可选）</h2>
+<p>改 LocalTransfer 的 <code>iceServers</code> 加上 STUN，用 <code>chrome://webrtc-internals</code> 观察：SDP 里出现了 srflx 候选；然后断掉内网让两台设备在不同网络，观察连通性检查打到 srflx、必要时掉到 relay。能指着 internals 说出每一步在发什么报文，这一课就算毕业。</p>
+
+<footer>
+<p>📌 <strong>有任何不清楚的地方，直接问你的 agent</strong>——它可以带你逐字节过一遍报文、解释 coturn 某条配置，或帮你把 demo 扩展到 CreatePermission + ChannelBind。</p>
+<p><a href="../reference/glossary.html">词汇表</a> · <a href="../reference/stun-turn-wire-format.html">线格式速查</a> · <a href="../lessons/0006-turn-relay-last-resort.html">← 第 6 课</a> · <a href="../RESOURCES.md">资源清单</a> · 第 8 课（第 7 课收官后的深挖专题）</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/order.js"></script>
+</body>
+</html>

@@ -21,8 +21,9 @@
 5. 0005 UDP 打洞 —— 会合服务器、同时发包钻洞、对称 NAT 失败（已完成）
 6. 0006 TURN —— Allocate/Permission/Channel、带宽成本、防开放中继（已完成）
 7. 0007 DataChannel 数据面 —— SCTP 语义、DCEP Channel Type、背压对照 sender.ts（已完成 ✅ 全课程 7 课收官）
+8. 0008 STUN/TURN 字节级解剖 —— 线格式 + 认证舞蹈，配套 demos/0008 三个可运行 demo（stun-client/stun-server/turn-allocate，全部实测通过：真实公网地址、coturn 认证全流程）（已完成 ✅ 用户点名深挖）
 
-**课程已完结（7/7）。下一步选项**：① 回头重做各课测验（间隔复习、巩固存储强度）② 真实世界任务：向别人讲一遍完整链路、或在真机/webrtc-internals 上验证 ③ 深挖专题（TURN 部署、DCEP 细节、SPEC 对照）④ 若用户要跨网 P2P，加第 8 课（STUN/TURN 落地与 coturn）
+**课程 8/8。下一步选项**：① 间隔复习（重做各课测验）② 真实世界任务：webrtc-internals 观察 srflx、跨网验证 relay ③ 深挖（TURN 部署/成本、RFC 5780 NAT 行为探测、coturn 生产配置）④ LocalTransfer 实际接入 STUN/TURN 跨网 P2P（MISSION 的下一里程碑）
 
 ## 已核实的技术事实（课程锚点，讲课时引用）
 

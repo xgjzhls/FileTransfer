@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>STUN / TURN 线格式速查 · LocalTransfer 教学课程</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>STUN / TURN 线格式速查</h1>
+<p class="subtitle">第 8 课配套速查：所有字节布局、方法/属性编号、认证流程与三个构造陷阱。基于 <a href="https://www.rfc-editor.org/rfc/rfc8489.txt">RFC 8489</a>（STUN，现行）与 <a href="https://www.rfc-editor.org/rfc/rfc8656.txt">RFC 8656</a>（TURN，现行，取代 5766）。</p>
+
+<h2>1. STUN 头（固定 20 字节）</h2>
+
+<pre> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|0 0|     MESSAGE TYPE (14 bits)  |       MESSAGE LENGTH (2B)   |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         MAGIC COOKIE (4B)                     |
+|                         0x2112A442                            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                    TRANSACTION ID (12 bytes)                  |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</pre>
+
+<ul>
+  <li><strong>MESSAGE TYPE</strong>：前 2 位恒为 0（用于区分其它协议）。method 与 class 位<b>交错</b>（见 §2）。</li>
+  <li><strong>MESSAGE LENGTH</strong>：<b>不含</b> 20 字节头；因属性按 4 字节对齐，末 2 位恒为 0。</li>
+  <li><strong>MAGIC COOKIE</strong>：0x2112A442，网络字节序。让服务器区分「是否理解新版属性」，也用于 XOR 与协议分用。</li>
+  <li><strong>TRANSACTION ID</strong>：96-bit，客户端随机生成，服务器<b>原样回传</b>；用于关联请求与响应、防伪造。</li>
+</ul>
+
+<h2>2. Message Type 编码（class 位与 method 位交错）</h2>
+
+<pre>  0                 1
+  2  3  4 5 6 7 8 9 0 1 2 3 4 5 6 7
+ +--+--+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ |M |M |M|M|M|C|M|M|M|C|M|M|M|M|
+ |11|10|9|8|7|1|6|5|4|0|3|2|1|0|
+ +--+--+-+-+-+-+-+-+-+-+-+-+-+-+-+</pre>
+
+<ul>
+  <li><strong>C1 = bit 8 (0x0100)</strong>，<strong>C0 = bit 4 (0x0010)</strong>。class：00=请求，01=指示，10=成功响应，11=错误响应。</li>
+  <li>method 位分散在 bit15–9、7–5、3–0。编码/解码公式见下。</li>
+  <li>RFC 5389 原话吐槽：<em>“This unfortunate encoding is due to assignment of values in [RFC3489] that did not consider encoding Indications, Success, and Errors using bit fields.”</em></li>
+</ul>
+
+<pre>// 编码（method 低 12 位 → 类型字段）
+m = (method &amp; 0x0f) | ((method &amp; 0x70) &lt;&lt; 1) | ((method &amp; 0xf80) &lt;&lt; 2);
+type = m | (klass &amp; 0x2 ? 0x0100 : 0) | (klass &amp; 0x1 ? 0x0010 : 0);
+
+// 解码
+method = (type &amp; 0x000f) | ((type &amp; 0x00e0) &gt;&gt; 1) | ((type &amp; 0x3e00) &gt;&gt; 2);
+klass  = ((type &amp; 0x0100) ? 2 : 0) | ((type &amp; 0x0010) ? 1 : 0);</pre>
+
+<table>
+<thead><tr><th>报文</th><th>type</th><th>method</th><th>class</th></tr></thead>
+<tbody>
+<tr><td class="term">Binding 请求</td><td>0x0001</td><td>0x001</td><td>请求</td></tr>
+<tr><td class="term">Binding 指示</td><td>0x0011</td><td>0x001</td><td>指示</td></tr>
+<tr><td class="term">Binding 成功响应</td><td>0x0101</td><td>0x001</td><td>成功</td></tr>
+<tr><td class="term">Binding 错误响应（401）</td><td>0x0111</td><td>0x001</td><td>错误</td></tr>
+<tr><td class="term">Allocate 请求</td><td>0x0003</td><td>0x003</td><td>请求</td></tr>
+<tr><td class="term">Allocate 成功响应</td><td>0x0103</td><td>0x003</td><td>成功</td></tr>
+<tr><td class="term">Allocate 错误响应（401）</td><td>0x0113</td><td>0x003</td><td>错误</td></tr>
+</tbody>
+</table>
+
+<h2>3. 属性：TLV 格式 + 4 字节对齐</h2>
+
+<pre> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|         TYPE (2B)             |        LENGTH (2B)            |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      VALUE (LENGTH 字节)…                      |
+|                     + 补零到 4 字节对齐                         |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</pre>
+
+<ul>
+  <li><strong>LENGTH 只计 VALUE 本身</strong>；补的 0 字节不算，但<b>在线路上存在</b>、也<b>参与 HMAC/CRC</b>。</li>
+  <li>对齐公式：<code>pad = (4 - (len % 4)) % 4</code>。例如 "alice"(5B) → 12B；"example.org"(11B) → 16B。</li>
+</ul>
+
+<h3>常用属性</h3>
+<table>
+<thead><tr><th>编号</th><th>名称</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td class="term">0x0001</td><td class="en">MAPPED-ADDRESS</td><td>旧版（RFC 3489）公网地址；现代服务器只发 XOR 版</td></tr>
+<tr><td class="term">0x0006</td><td class="en">USERNAME</td><td>认证用户名（UTF-8 字符串）</td></tr>
+<tr><td class="term">0x0008</td><td class="en">MESSAGE-INTEGRITY</td><td>HMAC-SHA1，20 字节（见 §5）</td></tr>
+<tr><td class="term">0x0009</td><td class="en">ERROR-CODE</td><td>2 保留 + 1 class + 1 number → 如 401 = 0x04,0x01</td></tr>
+<tr><td class="term">0x0014</td><td class="en">REALM</td><td>认证域（UTF-8）</td></tr>
+<tr><td class="term">0x0015</td><td class="en">NONCE</td><td>一次性挑战值（UTF-8）</td></tr>
+<tr><td class="term">0x0020</td><td class="en">XOR-MAPPED-ADDRESS</td><td>异或混淆的公网地址（见 §4）</td></tr>
+<tr><td class="term">0x8022</td><td class="en">SOFTWARE</td><td>可选项：服务器/客户端软件标识</td></tr>
+<tr><td class="term">0x8028</td><td class="en">FINGERPRINT</td><td>CRC-32 ^ 0x5354554E，必须最后一个属性</td></tr>
+</tbody>
+</table>
+
+<h3>TURN 新增方法（RFC 8656 §13）</h3>
+<table>
+<thead><tr><th>编号</th><th>方法</th><th>语义</th></tr></thead>
+<tbody>
+<tr><td class="term">0x003</td><td class="en">Allocate</td><td>分配中继地址（请求/响应）</td></tr>
+<tr><td class="term">0x004</td><td class="en">Refresh</td><td>续命分配（请求/响应）</td></tr>
+<tr><td class="term">0x006</td><td class="en">Send</td><td>客户端→服务器转发数据（指示，带 XOR-PEER-ADDRESS）</td></tr>
+<tr><td class="term">0x007</td><td class="en">Data</td><td>服务器→客户端转发数据（指示）</td></tr>
+<tr><td class="term">0x008</td><td class="en">CreatePermission</td><td>授权对端 IP 入站（请求/响应）</td></tr>
+<tr><td class="term">0x009</td><td class="en">ChannelBind</td><td>绑定 16 位通道号（请求/响应）</td></tr>
+</tbody>
+</table>
+
+<h3>TURN 新增属性（RFC 8656 §14）</h3>
+<table>
+<thead><tr><th>编号</th><th>名称</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td class="term">0x000C</td><td class="en">CHANNEL-NUMBER</td><td>通道号（0x4000–0x7FFF 有效）</td></tr>
+<tr><td class="term">0x000D</td><td class="en">LIFETIME</td><td>分配寿命秒数（默认 600）</td></tr>
+<tr><td class="term">0x0012</td><td class="en">XOR-PEER-ADDRESS</td><td>对端地址（Send/Data 指示里带）</td></tr>
+<tr><td class="term">0x0013</td><td class="en">DATA</td><td>转发数据本体</td></tr>
+<tr><td class="term">0x0016</td><td class="en">XOR-RELAYED-ADDRESS</td><td>分配到的中继地址</td></tr>
+<tr><td class="term">0x0018</td><td class="en">EVEN-PORT</td><td>请求偶端口（配合 RESERVATION-TOKEN）</td></tr>
+<tr><td class="term">0x0019</td><td class="en">REQUESTED-TRANSPORT</td><td>4 字节：协议号（17=UDP）+ 3 保留；Allocate 必带</td></tr>
+<tr><td class="term">0x0022</td><td class="en">RESERVATION-TOKEN</td><td>端口预留令牌</td></tr>
+</tbody>
+</table>
+
+<h2>4. XOR-MAPPED-ADDRESS（解码公式）</h2>
+
+<pre> 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|x x x x x x x x|    Family     |         X-Port                |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                X-Address (Variable)                           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+</pre>
+
+<ul>
+  <li><strong>Family</strong>：0x01=IPv4，0x02=IPv6。</li>
+  <li><strong>X-Port</strong> = 真端口 XOR <strong>0x2112</strong>（魔数高 16 位）；<strong>X-Address</strong>（IPv4）= 真 IP XOR <strong>0x2112A442</strong>。</li>
+  <li>IPv6：X-Address = IP XOR（魔数 + 96-bit 事务 ID）。</li>
+  <li>为什么 XOR：防止某些 NAT 改写在载荷里的二进制 IP 字段（RFC 5389 记载的部署经验）。</li>
+</ul>
+
+<h2>5. 长期凭据（Long-Term Credential）</h2>
+
+<ol>
+  <li>客户端发无凭据请求 → 服务器回 <strong>401</strong> + REALM + NONCE。</li>
+  <li>密钥：<code>key = MD5(username ":" realm ":" SASLprep(password))</code>，16 字节。</li>
+  <li>重发，带 USERNAME / REALM / NONCE / MESSAGE-INTEGRITY（/ FINGERPRINT）。</li>
+  <li>MESSAGE-INTEGRITY = HMAC-SHA1(key) over 消息（<b>长度字段暂不含 FINGERPRINT</b>），覆盖到 MI 属性之前。</li>
+  <li>FINGERPRINT 最后追加：长度字段<b>更新为含 FP</b> 后，CRC-32 覆盖到 FP 属性之前，再 XOR 0x5354554E。</li>
+</ol>
+
+<div class="key-insight">
+  <span class="label">三个构造陷阱（都是踩坑实证）</span>
+  <p>① 属性值必须补零到 4 字节对齐——不对齐，服务器读到的 USERNAME/REALM/NONCE 全是错位字节，认证必败。<br>
+  ② class 位不在高位连着排，而是 C1=bit8、C0=bit4 插在 method 位中间——按「高 2 位」提取 class 会得到错误结果。<br>
+  ③ 算 MESSAGE-INTEGRITY 时头部长度字段<b>不含</b> FINGERPRINT；加完 FP 再把长度字段更新为最终值再算 FP 的 CRC。两段长度，两个时点。</p>
+</div>
+
+<h2>6. Allocate 全流程（字节级）</h2>
+
+<pre>客户端                                          coturn
+  │  Allocate 请求（method 0x003，仅 REQUESTED-TRANSPORT=UDP）  │
+  ├────────────────────────────────────────────────────────────▶│
+  │                    401 Unauthorized                         │
+  │                    REALM="example.org" NONCE="…"            │
+  │◀────────────────────────────────────────────────────────────┤
+  │  key = MD5("alice:example.org:secret123")                  │
+  │  Allocate：REQUESTED-TRANSPORT + USERNAME + REALM + NONCE  │
+  │            + MESSAGE-INTEGRITY(20B) + FINGERPRINT(4B)       │
+  ├────────────────────────────────────────────────────────────▶│
+  │  0x0103 成功                                               │
+  │  XOR-RELAYED-ADDRESS（你的中继地址）                         │
+  │  XOR-MAPPED-ADDRESS（服务器看到的你，= STUN 兼职）           │
+  │  LIFETIME=600                                               │
+  │◀────────────────────────────────────────────────────────────┤</pre>
+
+<p>寿命：分配默认 600s（Refresh 续命）；权限 300s（CreatePermission 按 IP 授权）；通道绑定 600s。对端数据始终由服务器用 <b>UDP</b> 转发。</p>
+
+<h2>7. 认路清单</h2>
+<ul>
+  <li>真实 STUN 服务器：<code>stun.cloudflare.com:3478</code>、<code>stun.l.google.com:19302</code></li>
+  <li>本地 TURN：coturn 官方镜像 <code>coturn/coturn</code>（端口映射跑，见 <code>demos/0008/README.md</code>）</li>
+  <li>抓包自检：<code>chrome://webrtc-internals</code> 里能看到 ICE 候选与连通性检查</li>
+</ul>
+
+<footer>
+<a href="../lessons/0008-stun-and-turn-under-the-hood.html">← 第 8 课</a> · <a href="../reference/glossary.html">词汇表</a> · LocalTransfer 教学课程
+</footer>
+
+</body>
+</html>

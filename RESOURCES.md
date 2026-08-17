@@ -35,6 +35,13 @@
 
 ### NAT 与穿透（第 3–6 课）
 
+- [RFC 8489: Session Traversal Utilities for NAT (STUN)](https://www.rfc-editor.org/rfc/rfc8489.txt)
+  现行 STUN 规范（取代 5389）。报文头格式（§6，含 type 位图与 class/method 交错编码）、长期凭据（§9.2，key = MD5(user:realm:pass)）、FINGERPRINT（§14.5）。**第 8 课主来源**。
+- [RFC 8656: Traversal Using Relays around NAT (TURN)](https://www.rfc-editor.org/rfc/rfc8656.txt)
+  现行 TURN 规范（取代 5766）。方法表（§13：Allocate 0x003…）、属性表（§14：REQUESTED-TRANSPORT 0x0019 等）、Allocate 认证流程（§4.2 完整报文示例）。**第 8 课主来源**。
+- [coturn 官方 Docker 镜像文档](https://github.com/coturn/coturn/blob/master/docker/coturn/README.md)
+  本地跑 TURN 服务器的官方做法（端口映射/CLI 选项）。第 8 课 demo 3 前置。
+
 - [RFC 3489: STUN（含 NAT 四分类）](https://www.rfc-editor.org/rfc/rfc3489.html)
   全锥 / 限制锥 / 端口限制锥 / 对称 NAT 的权威定义（§5）；STUN 不适用于对称 NAT。**第 3 课主来源**。
 - [RFC 8445: Interactive Connectivity Establishment (ICE)](https://www.rfc-editor.org/rfc/rfc8445.html)
