@@ -44,6 +44,12 @@ openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr -subj "/C
 openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 365 -extfile ext.cnf
 ```
 
+
+> **2026-08-17（T07/ADR-0009 决策 4 落地）**：电脑腿（桌面 Chrome → app 本地 WSS）的证书机制已改为
+> **app 内自签**（CA 由 app 首次启动 WebCrypto 生成并持久化，叶证书按启动/网络变更自动重签，
+> SAN = `DNS:<deviceId>.local` + 当前 IP + 127.0.0.1）——桌面一次性信任 app 的 CA 即可
+> （`scripts/trust-local-ca.sh`），本目录的 OpenSSL CA 仅继续用于开发期本地 https 服务（如下）。
+
 ## 使用
 
 ```bash

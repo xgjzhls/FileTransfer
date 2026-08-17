@@ -37,9 +37,11 @@ import type { PeerInfo, SignalPayload } from '../protocol/signaling'
 import { detectKind } from '../device'
 // T05 局域网发现（ADR-0009）：mDNS 发现 + 原生信令通道 → WebRTC 数据面（分支 A）
 import { CHANNEL_ERRORS, DEFAULT_SIGNALING_PORT } from 'lan-discovery'
+import { DEFAULT_LOCAL_SERVER_PORT } from 'lan-discovery'
 import type { DeviceInfo as LanDeviceInfo, PeerConnectedEvent, TrackedDevice } from 'lan-discovery'
 import { LanDiscoverySession, describeLanError } from '../lan/lanSession'
-import { lanDiscoveryTransport } from '../lan/lanTransport'
+import { LocalServerSession } from '../lan/localServer'
+import { lanDiscoveryTransport, lanLocalServerTransport } from '../lan/lanTransport'
 import { getLanVisible } from '../lan/visibility'
 
 /** 信令服务地址（.env 注入，T03 部署；形如 wss://host/ws） */
@@ -189,6 +191,18 @@ export default function Home() {
   const [lanError, setLanError] = useState('')
   /** 信令服务器监听端口（null = 未监听；启动失败提示用） */
   const [lanPort, setLanPort] = useState<number | null>(null)
+  // ── T07 本地 WSS 服务器（电脑腿 A）：地址/指纹/客户端连接态 ──
+  const [localServer, setLocalServer] = useState<{
+    running: boolean
+    port: number | null
+    urls: string[]
+    fingerprint: string | null
+    clientConnected: boolean
+    error: string
+  }>({ running: false, port: null, urls: [], fingerprint: null, clientConnected: false, error: '' })
+  const localServerRef = useRef<LocalServerSession | null>(null)
+  /** 桌面连接地址复制反馈（「已复制」气泡） */
+  const [localCopied, setLocalCopied] = useState('')
   /** 正在点选连接的设备 id（按钮态） */
   const [lanConnecting, setLanConnecting] = useState<string | null>(null)
   /** 已建立原生信令通道的 peerId（UI「已连接」标记；瞬态幂等） */
@@ -314,6 +328,48 @@ export default function Home() {
       lanSessionRef.current = null
     }
     // 可见性切换 → 重建会话；依赖 lanVisible（事件闭包需取最新可见性）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lanVisible])
+
+  // T07：app 本地 WSS 信令服务器（电脑腿 A）——与发现会话同生命周期（lanVisible 门控）。
+  // 桌面 Chrome 连入此服务器（地址/CA 指纹见下方 UI）；信令中继给调用方（T08 接 WebRTC）。
+  useEffect(() => {
+    if (!IS_NATIVE) return
+    const session = new LocalServerSession({
+      transport: lanLocalServerTransport,
+      device: { ...device, kind: device.kind as LanDeviceInfo['kind'], port: DEFAULT_LOCAL_SERVER_PORT, ver: '1' },
+      events: {
+        onClientChange: (connected) => {
+          if (localServerRef.current !== session) return
+          setLocalServer((s) => ({ ...s, clientConnected: connected }))
+        },
+        onSignal: (_payload) => {
+          // T08：桌面 offer/answer 在此交给 ConnectionManager（与原生信令通道同构接线）
+        },
+        onError: (code, message) => {
+          if (localServerRef.current !== session) return
+          setLocalServer((s) => ({ ...s, running: false, error: message || code }))
+        },
+      },
+    })
+    localServerRef.current = session
+    if (lanVisible) {
+      void session.start().then((r) => {
+        if (localServerRef.current !== session) return
+        setLocalServer({
+          running: r.ok,
+          port: r.ok ? session.port : null,
+          urls: r.ok ? session.urls() : [],
+          fingerprint: r.ok ? session.caFingerprint : null,
+          clientConnected: false,
+          error: r.ok ? '' : (r.error ?? '启动失败'),
+        })
+      })
+    }
+    return () => {
+      void session.stop()
+      localServerRef.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lanVisible])
 
@@ -1489,6 +1545,54 @@ export default function Home() {
                 <p className="muted" style={{ fontSize: 12, margin: '2px 0 6px' }}>
                   信令服务器：:{lanPort}（SRV = TXT 端口）
                 </p>
+              )}
+              {/* T07 电脑腿 A：本地 WSS 信令服务器（桌面 Chrome 连入；地址 + CA 指纹 + 客户端态） */}
+              {IS_NATIVE && (
+                <div style={{ margin: '8px 0', padding: 8, border: '1px dashed #8884', borderRadius: 8 }}>
+                  <div className="row" style={{ justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>
+                      电脑腿连接{' '}
+                      <span className="badge ok">本地服务器</span>
+                    </span>
+                    {localServer.clientConnected && <span className="badge ok">● 电脑已连接</span>}
+                  </div>
+                  {localServer.running && localServer.port !== null ? (
+                    <>
+                      <p className="muted" style={{ fontSize: 12, margin: '4px 0' }}>
+                        桌面 Chrome 打开下方任一地址（手机与电脑需同一 Wi-Fi）：
+                      </p>
+                      {localServer.urls.map((url) => (
+                        <div key={url} className="row" style={{ gap: 6, margin: '4px 0' }}>
+                          <code style={{ fontSize: 11, wordBreak: 'break-all', flex: 1 }}>{url}</code>
+                          <button
+                            style={{ fontSize: 11, padding: '2px 8px' }}
+                            onClick={() => {
+                              void navigator.clipboard?.writeText(url)
+                              setLocalCopied(url)
+                              setTimeout(() => setLocalCopied(''), 1500)
+                            }}
+                          >
+                            {localCopied === url ? '已复制' : '复制'}
+                          </button>
+                        </div>
+                      ))}
+                      <p className="muted" style={{ fontSize: 11, margin: '6px 0 0' }}>
+                        首次需一次性信任证书：桌面运行{' '}
+                        <code style={{ fontSize: 10 }}>bash scripts/trust-local-ca.sh 到 ca.crt</code>
+                        （或把下方指纹与下载的 CA 比对）。本机 CA 指纹：
+                      </p>
+                      {localServer.fingerprint && (
+                        <code style={{ fontSize: 10, display: 'block', wordBreak: 'break-all', marginTop: 2 }}>
+                          {localServer.fingerprint}
+                        </code>
+                      )}
+                    </>
+                  ) : localServer.error ? (
+                    <p className="bad" style={{ fontSize: 12, margin: '4px 0' }}>{localServer.error}</p>
+                  ) : (
+                    <p className="muted" style={{ fontSize: 12, margin: '4px 0' }}>正在启动本地服务器…</p>
+                  )}
+                </div>
               )}
               {lanDevices.length === 0 ? (
                 lanPort === null ? (

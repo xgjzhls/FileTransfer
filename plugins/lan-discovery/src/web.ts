@@ -5,7 +5,15 @@
  * app 端（Capacitor）走原生实现；T06 仅在 app 内接入本插件。
  */
 import { WebPlugin } from '@capacitor/core'
-import type { LanDiscoveryPlugin, LanDiscoveryStatus, StartResult, StartSignalingResult } from './index'
+import type {
+  LanDiscoveryPlugin,
+  LanDiscoveryStatus,
+  LocalServerOptions,
+  LocalServerResult,
+  SendLocalMessageOptions,
+  StartResult,
+  StartSignalingResult,
+} from './index'
 import type { ConnectOptions, DeviceInfo, SendMessageOptions } from './index'
 
 const unavailable = (method: string) =>
@@ -34,6 +42,22 @@ export class WebLanDiscovery extends WebPlugin implements LanDiscoveryPlugin {
 
   stopSignalingServer(): Promise<{ ok: boolean }> {
     return unavailable('stopSignalingServer')
+  }
+
+  startLocalServer(_options: LocalServerOptions): Promise<LocalServerResult> {
+    return unavailable('startLocalServer')
+  }
+
+  stopLocalServer(): Promise<{ ok: boolean }> {
+    return unavailable('stopLocalServer')
+  }
+
+  sendLocalMessage(_options: SendLocalMessageOptions): Promise<{ ok: boolean; error?: string }> {
+    return unavailable('sendLocalMessage')
+  }
+
+  getLocalAddresses(): Promise<{ addresses: string[] }> {
+    return unavailable('getLocalAddresses')
   }
 
   connect(_options: ConnectOptions): Promise<{ ok: boolean; error?: string }> {

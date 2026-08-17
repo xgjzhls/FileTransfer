@@ -23,18 +23,31 @@ import com.getcapacitor.annotation.PermissionCallback;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.MessageDigest;
+import java.security.Principal;
+import java.security.PrivateKey;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -43,6 +56,12 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLServerSocket;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.X509ExtendedKeyManager;
 
 /**
  * ADR-0009 局域网发现插件 Android 实现（T03）：NsdManager 广告/浏览。
@@ -212,6 +231,7 @@ public class LanDiscoveryPlugin extends Plugin {
             o.put("browsing", browsing);
             o.put("permissionDenied", permissionDenied);
             o.put("signaling", signalingServer != null); // T04：信令服务器在监听
+            o.put("localServer", localServerSocket != null); // T07：本地 WSS 服务器在监听
             call.resolve(o);
         });
     }
@@ -1298,6 +1318,7 @@ public class LanDiscoveryPlugin extends Plugin {
         main.post(() -> {
             stopAdvertisingInternal();
             stopBrowsingInternal();
+            stopLocalServerInternal(true);
             if (signalingServer != null) {
                 try {
                     signalingServer.close();
@@ -1377,6 +1398,694 @@ public class LanDiscoveryPlugin extends Plugin {
 
     private static int utf8Bytes(String s) {
         return s.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+// ------------------------------------------------------------------
+    // 本地 WSS 服务器（T07 电脑腿 A，ADR-0009 决策 4 / SPEC §5.6）——
+    // WSS 作为桌面 Chrome 主动连入的信令宿主，只转信令（SDP/ICE），数据 WebRTC 直连。
+    // ------------------------------------------------------------------
+    //
+    // 协议（与 spike 参考实现 / iOS 逐条对齐，RFC 6455）：
+    // - 桌面连 `wss://<addr>/ws?device=<deviceId>`（device 必须匹配本机 deviceId）
+    // - 服务器还提供 GET `/`（信息 JSON）与 GET `/ca.crt`（CA 下载，桌面一次性信任脚本用）
+    // - 信令消息 = UTF-8 JSON 文本帧（SPEC §5.1 signal.payload；原生透明转发）
+    // - 服务器→客户端帧不掩码；客户端→服务器帧必须掩码（RFC 6455）；违反 → close 1002
+    // - 单桌面客户端；第二个连接 → HTTP 503；握手 10s 超时即断开
+    //
+    // 证书：JS 侧生成（cert.ts）→ PEM 直载 —— EC 私钥（PKCS#8）+ X509 证书 →
+    // 自定义 X509ExtendedKeyManager（避免 KeyStore/BouncyCastle 依赖）。
+    // 线程：插件方法 main；accept/read 在 daemon 线程；客户端状态经 localClientLock 同步。
+
+    private static final String WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    private static final int WS_MAX_MESSAGE_BYTES = 64 * 1024;
+    private static final int WS_MAX_HANDSHAKE_BYTES = 16 * 1024;
+
+    private SSLServerSocket localServerSocket;
+    private int localServerPort;
+    private Thread localServerThread;
+    /** 活跃桌面客户端（单客户端策略；读线程执行 relay） */
+    private SSLSocket localClient;
+    private final Object localClientLock = new Object();
+    /** 帧写互斥（sendLocalMessage 与 ping→pong 并发写同一 socket；审查项） */
+    private final Object localWriteLock = new Object();
+    private volatile boolean localServerRunning;
+    private String localCaPem;
+    private String localDeviceId;
+    private String localDeviceName;
+    private String localDeviceKind;
+    private String localDeviceVer;
+
+    @PluginMethod
+    public void startLocalServer(PluginCall call) {
+        main.post(() -> {
+            if (localServerSocket != null) {
+                JSObject o = new JSObject();
+                o.put("ok", true);
+                o.put("port", localServerPort);
+                o.put("addresses", new org.json.JSONArray(localIPv4Addresses()));
+                call.resolve(o);
+                return;
+            }
+            String certPem = call.getString("certPem");
+            String keyPem = call.getString("keyPem");
+            String caPem = call.getString("caPem");
+            JSONObject device = call.getObject("device");
+            if (certPem == null || keyPem == null || caPem == null || device == null) {
+                call.reject("certPem/keyPem/caPem/device 必填");
+                return;
+            }
+            int port = device.optInt("port", 9443);
+            try {
+                LocalServerCredentials creds = makeCredentials(certPem, keyPem);
+                SSLContext ctx = SSLContext.getInstance("TLS");
+                ctx.init(new KeyManager[]{creds.keyManager}, null, null);
+                SSLServerSocket server = (SSLServerSocket) ctx.getServerSocketFactory().createServerSocket(port);
+                server.setReuseAddress(false);
+                localServerSocket = server;
+                localServerPort = port;
+                localServerRunning = true;
+                localCaPem = caPem;
+                localDeviceId = device.optString("id", "");
+                localDeviceName = device.optString("name", "");
+                localDeviceKind = device.optString("kind", "");
+                localDeviceVer = device.optString("ver", "");
+                localServerThread = new Thread(this::localServerAcceptLoop, "lt-local-wss-accept");
+                localServerThread.setDaemon(true);
+                localServerThread.start();
+                JSObject o = new JSObject();
+                o.put("ok", true);
+                o.put("port", port);
+                o.put("addresses", new org.json.JSONArray(localIPv4Addresses()));
+                call.resolve(o);
+            } catch (Exception e) {
+                Log.w(TAG, "startLocalServer 失败", e);
+                localServerSocket = null;
+                localServerPort = 0;
+                JSObject o = new JSObject();
+                o.put("ok", false);
+                o.put("error", isPortInUse(e) ? "PORT_IN_USE" : "TLS_SETUP_FAILED");
+                call.resolve(o);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void stopLocalServer(PluginCall call) {
+        main.post(() -> {
+            stopLocalServerInternal(true);
+            call.resolve(new JSObject().put("ok", true));
+        });
+    }
+
+    @PluginMethod
+    public void sendLocalMessage(PluginCall call) {
+        String message = call.getString("message");
+        if (message == null || message.isEmpty()) {
+            call.reject("message 必填");
+            return;
+        }
+        byte[] payload = message.getBytes(StandardCharsets.UTF_8);
+        if (payload.length > WS_MAX_MESSAGE_BYTES) {
+            resolveError(call, "INVALID_PARAMS");
+            return;
+        }
+        SSLSocket client;
+        synchronized (localClientLock) {
+            client = localClient;
+        }
+        if (client == null || client.isClosed()) {
+            resolveError(call, "NO_CLIENT");
+            return;
+        }
+        try {
+            writeWsFrame(client, (byte) 0x1, payload, false);
+            call.resolve(new JSObject().put("ok", true));
+        } catch (IOException e) {
+            teardownLocalClient(false);
+            resolveError(call, "NO_CLIENT");
+        }
+    }
+
+    @PluginMethod
+    public void getLocalAddresses(PluginCall call) {
+        main.post(() -> call.resolve(new JSObject().put("addresses", new org.json.JSONArray(localIPv4Addresses()))));
+    }
+
+    // ------------------------------------------------------------------
+    // 本地服务器：接受循环 / HTTP 升级 / WS 帧（Android 线程模型）
+    // ------------------------------------------------------------------
+
+    private void localServerAcceptLoop() {
+        while (localServerRunning) {
+            try {
+                SSLSocket socket = (SSLSocket) localServerSocket.accept();
+                Thread t = new Thread(() -> handleLocalConnection(socket), "lt-local-wss-conn");
+                t.setDaemon(true);
+                t.start();
+            } catch (IOException e) {
+                if (localServerRunning) {
+                    Log.w(TAG, "local accept 失败", e);
+                }
+                break;
+            }
+        }
+    }
+
+    /** 单连接处理：HTTP 升级（/ws、/、/ca.crt）。socket 由调用线程负责关闭。 */
+    private void handleLocalConnection(SSLSocket socket) {
+        try {
+            socket.setSoTimeout(10_000); // 握手超时（读挂起 10s 即断开）
+            byte[] header = readHttpHeader(socket);
+            if (header == null) {
+                socket.close();
+                return;
+            }
+            socket.setSoTimeout(0);
+            ParsedRequest req = parseHttpRequest(header);
+            if (req == null) {
+                writeHttpResponse(socket, 400, null, "text/plain");
+                socket.close();
+                return;
+            }
+            if (req.path.equals("/ws")) {
+                if (req.headers.getOrDefault("upgrade", "").equalsIgnoreCase("websocket")
+                        && req.headers.getOrDefault("connection", "").toLowerCase(Locale.ROOT).contains("upgrade")
+                        && "13".equals(req.headers.get("sec-websocket-version"))
+                        && req.headers.get("sec-websocket-key") != null
+                        && localDeviceId.equals(req.query.get("device"))) {
+                    // 单客户端认领：检查 + 占位赋值原子（防双握手 TOCTOU，审查项）；101 写入后失败则释放认领
+                    boolean busy;
+                    synchronized (localClientLock) {
+                        busy = localClient != null && !localClient.isClosed();
+                        if (!busy) localClient = socket;
+                    }
+                    if (busy) {
+                        writeHttpResponse(socket, 503, null, "text/plain");
+                        socket.close();
+                        return;
+                    }
+                    String accept = wsAccept(req.headers.get("sec-websocket-key"));
+                    String response = "HTTP/1.1 101 Switching Protocols\r\n"
+                            + "Upgrade: websocket\r\n"
+                            + "Connection: Upgrade\r\n"
+                            + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+                    try {
+                        socket.getOutputStream().write(response.getBytes(StandardCharsets.UTF_8));
+                        socket.getOutputStream().flush();
+                    } catch (IOException e) {
+                        // 101 写失败：释放认领（仍归我们所有才清）
+                        synchronized (localClientLock) {
+                            if (localClient == socket) localClient = null;
+                        }
+                        socket.close();
+                        return;
+                    }
+                    notifyListeners("localClientConnected", new JSObject());
+                    relayLoop(socket);
+                    teardownLocalClient(true); // 客户端断开/关闭 → 通知 JS（与 iOS 对称）
+                    return;
+                }
+                // 升级条件不满足
+                writeHttpResponse(socket, 400, null, "text/plain");
+                socket.close();
+                return;
+            }
+            if (req.path.equals("/ca.crt") && localCaPem != null) {
+                writeHttpResponse(socket, 200, localCaPem, "application/x-pem-file");
+                socket.close();
+                return;
+            }
+            if (req.path.equals("/")) {
+                JSONObject info = new JSONObject();
+                try {
+                    info.put("name", localDeviceName);
+                    info.put("id", localDeviceId);
+                    info.put("kind", localDeviceKind);
+                    info.put("ver", localDeviceVer);
+                    info.put("port", localServerPort);
+                } catch (JSONException ignored) {
+                }
+                writeHttpResponse(socket, 200, info.toString(), "application/json");
+                socket.close();
+                return;
+            }
+            writeHttpResponse(socket, 404, null, "text/plain");
+            socket.close();
+        } catch (Exception e) {
+            closeQuietly(socket);
+        }
+    }
+
+    /** WS 帧读循环（直到关闭/违规/close 帧）：text → 中继；ping → pong；close → 回应并退出 */
+    private void relayLoop(SSLSocket socket) throws IOException {
+        int fragmentOpcode = -1;
+        ByteArrayOutputStream fragment = new ByteArrayOutputStream();
+        while (true) {
+            WsFrame frame;
+            try {
+                frame = readWsFrame(socket);
+            } catch (IOException e) {
+                return; // 断开/超时
+            }
+            if (frame == FrameRead.VIOLATION) {
+                writeWsClose(socket, 1002, "protocol error");
+                return;
+            }
+            if (frame == FrameRead.INCOMPLETE) {
+                return; // 上游校验异常（消息过大等）
+            }
+            byte opcode = frame.opcode;
+            if (opcode == 0x8) { // close
+                writeWsClose(socket, 1000, "");
+                return;
+            } else if (opcode == 0x9) { // ping
+                writeWsFrame(socket, (byte) 0xa, frame.payload, false);
+            } else if (opcode == 0xa) { // pong
+                // 忽略
+            } else if (opcode == 0x1 || opcode == 0x0) { // text / continuation
+                if (opcode == 0x1 && frame.fin) {
+                    if (fragmentOpcode != -1) {
+                        writeWsClose(socket, 1002, "unexpected frame");
+                        return;
+                    }
+                    if (!relayMessage(frame.payload)) {
+                        writeWsClose(socket, 1002, "invalid message");
+                        return;
+                    }
+                } else if (opcode == 0x1) {
+                    if (fragmentOpcode != -1) {
+                        writeWsClose(socket, 1002, "unexpected frame");
+                        return;
+                    }
+                    if (fragment.size() + frame.payload.length > WS_MAX_MESSAGE_BYTES) {
+                        writeWsClose(socket, 1009, "message too big");
+                        return;
+                    }
+                    fragmentOpcode = 0x1;
+                    fragment.reset();
+                    fragment.write(frame.payload, 0, frame.payload.length);
+                } else { // continuation
+                    if (fragmentOpcode == -1) {
+                        writeWsClose(socket, 1002, "unexpected continuation");
+                        return;
+                    }
+                    if (fragment.size() + frame.payload.length > WS_MAX_MESSAGE_BYTES) {
+                        writeWsClose(socket, 1009, "message too big");
+                        return;
+                    }
+                    fragment.write(frame.payload, 0, frame.payload.length);
+                    if (frame.fin) {
+                        if (!relayMessage(fragment.toByteArray())) {
+                            writeWsClose(socket, 1002, "invalid message");
+                            return;
+                        }
+                        fragment.reset();
+                        fragmentOpcode = -1;
+                    }
+                }
+            } else {
+                writeWsClose(socket, 1002, "unknown opcode");
+                return;
+            }
+        }
+    }
+
+    /**
+     * 信令消息中继：验证 JSON（signal.payload 结构）后原样转发 JS；非法 → false
+     * （调用方 close 1002，与 iOS handleLocalWsMessage 行为对齐）。
+     */
+    private boolean relayMessage(byte[] payload) {
+        if (payload.length > WS_MAX_MESSAGE_BYTES) return false;
+        try {
+            JSONObject json = new JSONObject(new String(payload, StandardCharsets.UTF_8));
+            int v = json.optInt("v", -1);
+            String type = json.optString("type", "");
+            String kind = json.optString("kind", "");
+            String sdp = json.optString("sdp", "");
+            if (v != 1 || !type.equals("signal") || !(kind.equals("offer") || kind.equals("answer")) || sdp.isEmpty()) {
+                return false;
+            }
+            JSObject data = new JSObject();
+            data.put("message", new String(payload, StandardCharsets.UTF_8));
+            notifyListeners("localMessageReceived", data);
+            return true;
+        } catch (JSONException ignored) {
+            return false;
+        }
+    }
+
+    /** 结束活跃客户端（幂等；通知 JS） */
+    private void teardownLocalClient(boolean notifyJs) {
+        SSLSocket client;
+        synchronized (localClientLock) {
+            client = localClient;
+            localClient = null;
+        }
+        if (client != null) {
+            closeQuietly(client);
+        }
+        if (notifyJs && client != null) {
+            notifyListeners("localClientDisconnected", new JSObject());
+        }
+    }
+
+    private void stopLocalServerInternal(boolean notifyClient) {
+        localServerRunning = false;
+        teardownLocalClient(notifyClient);
+        SSLServerSocket server = localServerSocket;
+        localServerSocket = null;
+        localServerPort = 0;
+        localCaPem = null;
+        if (server != null) {
+            try {
+                server.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // WS 帧编解码（Android 侧；与 iOS/spike 参考实现逐条对齐）
+    // ------------------------------------------------------------------
+
+    /** 帧解析结果：帧 / 不完整（等待更多数据）/ 协议违规（未掩码、长度超限） */
+    private static final class FrameRead {
+        static final WsFrame VIOLATION = new WsFrame();
+        static final WsFrame INCOMPLETE = new WsFrame();
+    }
+
+    private static final class WsFrame {
+        byte opcode;
+        boolean fin;
+        byte[] payload;
+    }
+
+    /** 读一帧（客户端掩码帧）；非掩码/超限 → VIOLATION；半帧阻塞等待（Socket 超时兜底） */
+    private WsFrame readWsFrame(SSLSocket socket) throws IOException {
+        java.io.InputStream in = socket.getInputStream();
+        int b0 = in.read();
+        int b1 = in.read();
+        if (b0 < 0 || b1 < 0) throw new IOException("EOF");
+        boolean fin = (b0 & 0x80) != 0;
+        byte opcode = (byte) (b0 & 0x0f);
+        boolean masked = (b1 & 0x80) != 0;
+        if (!masked) return FrameRead.VIOLATION;
+        int len = b1 & 0x7f;
+        if (len == 126) {
+            int h = in.read();
+            int l = in.read();
+            if (h < 0 || l < 0) throw new IOException("EOF");
+            len = (h << 8) | l;
+        } else if (len == 127) {
+            long big = 0L;
+            for (int i = 0; i < 8; i++) {
+                int x = in.read();
+                if (x < 0) throw new IOException("EOF");
+                big = (big << 8) | x;
+            }
+            if (big > WS_MAX_MESSAGE_BYTES) return FrameRead.VIOLATION;
+            len = (int) big;
+        }
+        if (len > WS_MAX_MESSAGE_BYTES) return FrameRead.VIOLATION;
+        byte[] mask = new byte[4];
+        readFully(in, mask);
+        byte[] payload = new byte[len];
+        readFully(in, payload);
+        for (int i = 0; i < payload.length; i++) {
+            payload[i] ^= mask[i % 4];
+        }
+        WsFrame f = new WsFrame();
+        f.opcode = opcode;
+        f.fin = fin;
+        f.payload = payload;
+        return f;
+    }
+
+    /** 服务器→客户端帧（不掩码；长度 7/16/64 位编码；帧级写互斥） */
+    private void writeWsFrame(SSLSocket socket, byte opcode, byte[] payload, boolean masked) throws IOException {
+        if (payload.length > WS_MAX_MESSAGE_BYTES) {
+            throw new IOException("frame too big");
+        }
+        if (masked) {
+            // 服务器→客户端从不掩码
+            throw new IOException("server frames must not be masked");
+        }
+        synchronized (localWriteLock) {
+            java.io.OutputStream out = socket.getOutputStream();
+            out.write(0x80 | opcode);
+            int len = payload.length;
+            if (len < 126) {
+                out.write(len);
+            } else if (len <= 0xFFFF) {
+                out.write(126);
+                out.write((len >> 8) & 0xFF);
+                out.write(len & 0xFF);
+            } else {
+                out.write(127);
+                long big = len;
+                for (int i = 7; i >= 0; i--) {
+                    out.write((int) ((big >> (8 * i)) & 0xFF));
+                }
+            }
+            out.write(payload);
+            out.flush();
+        }
+    }
+
+    private void writeWsClose(SSLSocket socket, int code, String reason) throws IOException {
+        byte[] body = new byte[2 + reason.getBytes(StandardCharsets.UTF_8).length];
+        body[0] = (byte) ((code >> 8) & 0xFF);
+        body[1] = (byte) (code & 0xFF);
+        System.arraycopy(reason.getBytes(StandardCharsets.UTF_8), 0, body, 2, reason.getBytes(StandardCharsets.UTF_8).length);
+        try {
+            writeWsFrame(socket, (byte) 0x8, body, false);
+        } catch (IOException ignored) {
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // HTTP 解析 / 响应（本地服务器专用）
+    // ------------------------------------------------------------------
+
+    private static final class ParsedRequest {
+        String path;
+        Map<String, String> headers = new HashMap<>();
+        Map<String, String> query = new HashMap<>();
+    }
+
+    /** 读取 HTTP 头直到 \r\n\r\n（上限 16KB；超限返回 null 由调用方 431/直接关闭） */
+    private byte[] readHttpHeader(SSLSocket socket) throws IOException {
+        java.io.InputStream in = socket.getInputStream();
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        int state = 0; // 0=未开始 1='\r' 2='\r\n' 3='\r\n\r'
+        int b;
+        while (true) {
+            b = in.read();
+            if (b < 0) return null;
+            buf.write(b);
+            switch (state) {
+                case 0: state = (b == '\r') ? 1 : 0; break;
+                case 1: state = (b == '\n') ? 2 : 0; break;
+                case 2: state = (b == '\r') ? 3 : 0; break;
+                case 3: return (b == '\n') ? buf.toByteArray() : null;
+                default: break;
+            }
+            if (buf.size() > WS_MAX_HANDSHAKE_BYTES) return null;
+        }
+    }
+
+    private ParsedRequest parseHttpRequest(byte[] header) {
+        String text = new String(header, StandardCharsets.UTF_8);
+        String[] lines = text.split("\r\n", -1);
+        if (lines.length == 0 || !lines[0].startsWith("GET ")) return null;
+        String[] parts = lines[0].split(" ", 3);
+        if (parts.length < 2) return null;
+        String target = parts[1];
+        ParsedRequest req = new ParsedRequest();
+        int q = target.indexOf('?');
+        if (q >= 0) {
+            req.path = target.substring(0, q);
+            String[] pairs = target.substring(q + 1).split("&");
+            for (String pair : pairs) {
+                int eq = pair.indexOf('=');
+                if (eq > 0) {
+                    req.query.put(pair.substring(0, eq), pair.substring(eq + 1));
+                }
+            }
+        } else {
+            req.path = target;
+        }
+        for (int i = 1; i < lines.length; i++) {
+            int colon = lines[i].indexOf(':');
+            if (colon > 0) {
+                req.headers.put(lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT),
+                        lines[i].substring(colon + 1).trim());
+            }
+        }
+        return req;
+    }
+
+    private void writeHttpResponse(SSLSocket socket, int status, String body, String contentType) throws IOException {
+        String reason;
+        switch (status) {
+            case 200: reason = "OK"; break;
+            case 404: reason = "Not Found"; break;
+            case 503: reason = "Service Unavailable"; break;
+            default: reason = "Error"; break;
+        }
+        String payload = body == null ? "" : body;
+        byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8);
+        String response = "HTTP/1.1 " + status + " " + reason + "\r\n"
+                + "Content-Type: " + contentType + "\r\n"
+                + "Content-Length: " + payloadBytes.length + "\r\n"
+                + "Connection: close\r\n\r\n";
+        socket.getOutputStream().write(response.getBytes(StandardCharsets.UTF_8));
+        socket.getOutputStream().write(payloadBytes);
+        socket.getOutputStream().flush();
+    }
+
+    /** WebSocket accept：base64(SHA1(key + GUID)) */
+    private String wsAccept(String key) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-1");
+            byte[] digest = md.digest((key + WS_GUID).getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(digest);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 证书（PEM → SSL keyManager）与地址枚举
+    // ------------------------------------------------------------------
+
+    private static final class LocalServerCredentials {
+        final KeyManager keyManager;
+        LocalServerCredentials(KeyManager keyManager) {
+            this.keyManager = keyManager;
+        }
+    }
+
+    /** PEM（DER 文本）→ 证书 + EC 私钥 → 自定义 X509ExtendedKeyManager（免 KeyStore） */
+    private LocalServerCredentials makeCredentials(String certPem, String keyPem) throws Exception {
+        byte[] certDer = pemToDer(certPem, "CERTIFICATE");
+        byte[] keyDer = pemToDer(keyPem, "PRIVATE KEY");
+        X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new java.io.ByteArrayInputStream(certDer));
+        PrivateKey privateKey = KeyFactory.getInstance("EC")
+                .generatePrivate(new PKCS8EncodedKeySpec(keyDer));
+        return new LocalServerCredentials(new LocalX509KeyManager(cert, privateKey));
+    }
+
+    private static byte[] pemToDer(String pem, String label) {
+        String begin = "-----BEGIN " + label + "-----";
+        String end = "-----END " + label + "-----";
+        int s = pem.indexOf(begin);
+        int e = pem.indexOf(end);
+        if (s < 0 || e < 0) throw new IllegalArgumentException("PEM 缺 " + label + " 块");
+        String b64 = pem.substring(s + begin.length(), e).replaceAll("\\s", "");
+        return Base64.getDecoder().decode(b64);
+    }
+
+    private static final class LocalX509KeyManager extends X509ExtendedKeyManager {
+        private final X509Certificate cert;
+        private final PrivateKey privateKey;
+
+        LocalX509KeyManager(X509Certificate cert, PrivateKey privateKey) {
+            this.cert = cert;
+            this.privateKey = privateKey;
+        }
+
+        @Override
+        public String[] getClientAliases(String keyType, Principal[] issuers) {
+            return null;
+        }
+
+        @Override
+        public String chooseClientAlias(String[] keyType, Principal[] issuers, java.net.Socket socket) {
+            return null;
+        }
+
+        @Override
+        public String[] getServerAliases(String keyType, Principal[] issuers) {
+            return new String[]{"lt"};
+        }
+
+        @Override
+        public String chooseServerAlias(String keyType, Principal[] issuers, java.net.Socket socket) {
+            return "lt";
+        }
+
+        @Override
+        public X509Certificate[] getCertificateChain(String alias) {
+            return new X509Certificate[]{cert};
+        }
+
+        @Override
+        public PrivateKey getPrivateKey(String alias) {
+            return privateKey;
+        }
+    }
+
+    /** 当前接口局域网 IPv4（滤回环；链路本地保留排除（如 169.254.*））。返回 [] 表示异常 */
+    private List<String> localIPv4Addresses() {
+        List<String> result = new ArrayList<>();
+        try {
+            Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
+            while (ifaces.hasMoreElements()) {
+                NetworkInterface iface = ifaces.nextElement();
+                if (iface.isLoopback() || !iface.isUp()) continue;
+                byte[] mac = iface.getHardwareAddress();
+                if (mac == null) continue; // 隧道/虚拟接口（无 MAC）——不展示
+                Enumeration<InetAddress> addrs = iface.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    InetAddress addr = addrs.nextElement();
+                    if (addr instanceof java.net.Inet4Address) {
+                        String ip = addr.getHostAddress();
+                        if (!ip.startsWith("169.254.")) {
+                            result.add(ip);
+                        }
+                    }
+                }
+            }
+        } catch (SocketException ignored) {
+        }
+        return result;
+    }
+
+    private static void readFully(java.io.InputStream in, byte[] buf) throws IOException {
+        int off = 0;
+        while (off < buf.length) {
+            int n = in.read(buf, off, buf.length - off);
+            if (n < 0) throw new IOException("EOF");
+            off += n;
+        }
+    }
+
+    private static boolean isPortInUse(Exception e) {
+        Throwable t = e;
+        while (t != null) {
+            if (t instanceof java.net.BindException) return true;
+            if (t instanceof java.net.SocketException) return true;
+            t = t.getCause();
+        }
+        return false;
+    }
+
+    private static void closeQuietly(java.io.Closeable c) {
+        if (c != null) {
+            try {
+                c.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private static void resolveError(PluginCall call, String error) {
+        JSObject o = new JSObject();
+        o.put("ok", false);
+        o.put("error", error);
+        call.resolve(o);
     }
 
     private static int parseIntOrZero(String s) {

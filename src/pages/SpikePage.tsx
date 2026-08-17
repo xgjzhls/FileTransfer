@@ -6,6 +6,8 @@ import { LanDiscovery, DeviceRegistry, LAN_CHANNEL_EVENTS } from 'lan-discovery'
 import type { DeviceInfo, TrackedDevice } from 'lan-discovery'
 import { runOpfsQuotaTest, clearOpfsTestData, type OpfsQuotaResult } from '../spike/opfs'
 import { runStreamDownloadTest, type StreamDownloadResult } from '../spike/streamDownload'
+import { LocalServerSession, makeLocalSignalMessage } from '../lan/localServer'
+import { lanLocalServerTransport } from '../lan/lanTransport'
 import { createNativeExportBridge } from '../native/bridge'
 import { copyFileToNative } from '../transfer/nativeExport'
 import { getOrCreateDeviceId } from '../rooms/session'
@@ -379,6 +381,74 @@ export default function SpikePage() {
     }
   }
 
+  // ---- T07 本地 WSS 服务器探针（电脑腿 A：启动/地址/指纹/客户端/中继）----
+  const [localServerProbe, setLocalServerProbe] = useState<{
+    port: number
+    urls: string[]
+    fingerprint: string
+    clientConnected: boolean
+    messages: string[]
+  } | null>(null)
+  const localServerRef = useRef<LocalServerSession | null>(null)
+
+  async function handleLocalServer(on: boolean) {
+    setLanBusy('本地服务器')
+    try {
+      if (on) {
+        const session = new LocalServerSession({
+          transport: lanLocalServerTransport,
+          device: { ...advertOptions },
+          events: {
+            onClientChange: (connected) =>
+              setLocalServerProbe((s) => (s ? { ...s, clientConnected: connected } : s)),
+            onSignal: (payload) =>
+              setLocalServerProbe((s) =>
+                s
+                  ? { ...s, messages: [...s.messages, `收到桌面 ${payload.kind}（sdp ${payload.sdp.slice(0, 40)}…）`].slice(-8) }
+                  : s,
+              ),
+            onError: (code, message) => lanPush(`本地服务器错误：${code} ${message}`),
+          },
+        })
+        localServerRef.current = session
+        const r = await session.start()
+        if (r.ok && session.port !== null) {
+          setLocalServerProbe({
+            port: session.port,
+            urls: session.urls(),
+            fingerprint: session.caFingerprint ?? '',
+            clientConnected: false,
+            messages: ['本地服务器已监听 ✓（CA 已持久化）'],
+          })
+        } else {
+          lanPush(`本地服务器启动失败：${r.error ?? '未知错误'}`)
+        }
+      } else {
+        await localServerRef.current?.stop()
+        localServerRef.current = null
+        setLocalServerProbe(null)
+        lanPush('本地服务器已停止')
+      }
+    } catch (e) {
+      lanPush(`本地服务器失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
+  async function handleLocalSend() {
+    setLanBusy('本地发送')
+    try {
+      const text = makeLocalSignalMessage({ kind: 'offer', sdp: `probe-${Date.now()}` })
+      const sent = await lanLocalServerTransport.sendLocalMessage({ message: text })
+      lanPush(`发测试 signal → ${JSON.stringify(sent)}`)
+    } catch (e) {
+      lanPush(`本地发送失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setLanBusy('')
+    }
+  }
+
   return (
     <>
       <header>
@@ -526,6 +596,33 @@ export default function SpikePage() {
           </>
         )}
         {lanLog.map((line, i) => <pre key={i} className="mono">{line}</pre>)}
+      </Card>
+
+      <Card title="测试 6：本地 WSS 服务器（T07 电脑腿 A，仅 app 内）">
+        <p>
+          T07 验收：App 起本地 WSS 信令服务器（默认 9443，被占依次试 9444/9445）→ 桌面 Chrome 连
+          <code className="mono">wss://&lt;地址&gt;/ws?device=&lt;deviceId&gt;</code>（证书由 App 自签，桌面一次性信任 CA）→ 双向交换
+          offer/answer → 数据面 WebRTC 直连（文件不经服务器）。首次启动会生成并持久化 CA（<code className="mono">lt.localCa</code>）。
+        </p>
+        <div className="row">
+          <button onClick={() => handleLocalServer(true)} disabled={!!lanBusy || !IS_NATIVE}>
+            {lanBusy === '本地服务器' ? '启动中…' : localServerProbe ? `本地服务器 :${localServerProbe.port}` : '启动本地服务器'}
+          </button>
+          <button onClick={() => handleLocalServer(false)} disabled={!!lanBusy || !IS_NATIVE}>停本地服务器</button>
+          <button onClick={() => handleLocalSend()} disabled={!!lanBusy || !IS_NATIVE || !localServerProbe?.clientConnected}>发测试 signal</button>
+        </div>
+        {!IS_NATIVE && <p className="bad">仅 app 内可用（浏览器无监听能力，ADR-0009 决策 4）</p>}
+        {localServerProbe && (
+          <>
+            <p className="mono">地址：{localServerProbe.urls.join(' / ')}</p>
+            <p className="mono">CA 指纹：{localServerProbe.fingerprint}</p>
+            <p className="mono">
+              桌面客户端：{localServerProbe.clientConnected ? '已连接 ✓' : '未连接'}；CA 下载：
+              <code className="mono">https://&lt;地址&gt;/ca.crt</code>（curl -k + 指纹校验）
+            </p>
+            {localServerProbe.messages.map((m, i) => <pre key={i} className="mono">{m}</pre>)}
+          </>
+        )}
       </Card>
     </>
   )

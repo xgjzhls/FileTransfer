@@ -164,11 +164,12 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 
 ### 5.6 本地信令服务器（电脑腿，ADR-0009）
 
-- **动机**：Chrome 网页无法被发现（纯浏览器限制），只能主动连接；https PWA → 明文 `ws://LAN-IP` 被 Chrome mixed content 硬拦；`http://IP` 顶级导航失去 secure context（OPFS 不可用）→ 必须 **WSS + 可信证书**
-- **服务器**：app 原生层监听（NWListener / ServerSocket，默认 8443），WSS，**只转信令**（SDP/ICE 在 Chrome 网页与 app 内 WKWebView 之间转发）；文件数据仍 WebRTC 直连（不违反「数据不经过任何中间设备」）
-- **证书**：`.local-certs` CA 签发，SAN 覆盖桌面连接地址；桌面 Chrome 一次性信任 CA（脚本：macOS `security add-trusted-cert` / Windows `certutil`）；机制选项（T07 定）：按 IP 重签 / CA 密钥随包 / `.local` SAN + 桌面解析能力验证
-- **地址发现**：app 界面显示地址（IP:port 或 `.local` 名），Chrome 输一次存 `lt.localServer`，重开自动重连；DHCP 换 IP 重输；失败降级现有 QR（§5.3）
-- **协议**：Chrome 网页 `wss://<addr>/ws?device=<deviceId>` 连入，与 app 端交换 signal（同 §5.1 schema）
+- **动机**：Chrome 网页无法被发现（纯浏览器限制），只能主动连接；https PWA → 明文 `ws://LAN-IP` 被 Chrome mixed content 硬拦（spike 实测：`Failed to construct WebSocket: insecure WebSocket connection may not be initiated from a page loaded over HTTPS`）；`http://IP` 顶级导航失去 secure context（OPFS 不可用）→ 必须 **WSS + 可信证书**。spike 另验证（2026-08-17，chromium-1200）：公开 https 页（GitHub Pages PWA）→ `wss://LAN-IP` 无 Private Network Access 拦截；Chrome（macOS）解析 `.local` 主机名（Windows 需 Bonjour，T09 真机验）
+- **服务器**：app 原生层监听（iOS NWListener + TLS / Android SSLServerSocket，默认 9443，PORT_IN_USE 依次试 9444/9445），WSS，**只转信令**（SDP/ICE 在 Chrome 网页与 app 内 WKWebView 之间转发）；文件数据仍 WebRTC 直连（不违反「数据不经过任何中间设备」）。**端口与 app↔app TCP 信令（8443）分离**，避免双监听冲突（T07 备注「WSS 端口冲突/占用处理」落地）
+- **证书（T07 spike 拍板：app 内自签 + `.local` SAN）**：CA 由 app 首次启动时 WebCrypto 生成（ECDSA P-256）并持久化（`lt.localCa*`，CA 永不变 → 桌面一次性信任后换 IP/重签均无需再操作）；叶证书每次启动/网络变更自动重签，SAN = `DNS:<deviceId>.local` + 当前接口 IP + 127.0.0.1（`.local` 使 DHCP 换 IP 在 macOS 零操作；IP 路径重输地址，T08）；桌面一次性信任脚本 `scripts/trust-local-ca.sh`（macOS `security add-trusted-cert` / Windows `certutil -addstore -f Root`），CA 经 `https://<ip>:<port>/ca.crt` 下载（curl -k + SHA-256 指纹比对，指纹 app 界面显示）
+- **协议（RFC 6455，wire 与原生信令通道同构）**：桌面连 `wss://<addr>/ws?device=<deviceId>`（device 必须匹配本机 deviceId；app 界面展示完整地址可复制）；服务器另提供 `GET /`（设备信息 JSON）与 `GET /ca.crt`（CA PEM）；信令消息 = UTF-8 JSON 文本帧 `{v:1,type:"signal",kind, sdp}`（与 channel.ts SignalMessage 同构，sdp 与 WS/QR 同一压缩约定）；客户端帧必须掩码（违规 close 1002）；**单桌面客户端**（第二个连接 HTTP 503；握手 10s 超时断开）
+- **地址发现**：app 界面显示地址（`wss://<ip>:<port>/ws?device=<id>`，可复制），Chrome 输一次存 `lt.localServer`，重开自动重连；DHCP 换 IP 重输；失败降级现有 QR（§5.3）
+- **边界**：iOS 后台/锁屏监听受限（前台为主；退后台挂起、回前台按留存参数重建）；本地网络权限被拒（LOCAL_NETWORK_DENIED）→ 引导重开
 
 ## 6. 应用流程（UI）
 

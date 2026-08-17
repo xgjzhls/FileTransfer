@@ -63,7 +63,7 @@
 - 多选批量导出（T20）：接收列表复选框多选（仅已完成文件，可跨顶层目录组勾选），三种批量操作——「导出选中到文件夹…」（桌面 FSA，保持相对路径：photos/a.jpg → 目标目录下 photos/a.jpg，根目录散文件放目标根）/「导出选中 zip」（跨组打包，deflate level 6，手机分享/桌面下载路由同分组 zip）/「批量分享选中」（手机，shareNames 消歧）；导出不设大小上限（T22）；新会话（meta）自动清空勾选；现有逐文件与分组导出全部保留
 - 点击放大全屏（T21）：离线配对 offer/answer 二维码均可点击放大为全屏超大码（min(88vw,82vh)，渲染上限 1024），点码外空白处 / Esc 关闭（SPEC §5.3）
 - iOS app 壳 + 原生文件夹导出（ADR-0008，2026-08-16 已接受，**T01-T05 已完成 2026-08-16**）：「先选文件夹 → 分块流式拷贝」在纯网页版物理不可行（iOS Safari 无 FSA picker，WebKit 反对）→ 方案 = Capacitor 打包 + `UIDocumentPicker(.folder)` 选文件夹（一次，会话内）→ security-scoped URL → OPFS 磁盘背书 File 的 `stream()` 分块（4 MiB）经桥逐块写，峰值内存 = 块大小；分享面板降级次级按钮（`@capacitor/share`）；v1 每次重选文件夹（不持久化）；iOS 先行，Android 后续单独评估；桌面 FSA 直写不动（重名冲突复用 uniqueZipPaths 追加序号；取消 = 停止当前文件、已写保留）
-- **局域网发现 + 本地信令服务器（ADR-0009，2026-08-16 已接受）**：app 原生层 mDNS/DNS-SD 发现（`_localtranfer._tcp` + TXT=name/id/kind/port/ver；iOS Network.framework / Android NsdManager），app↔app 离线免扫码直连（原生信令通道 TCP 交换 SDP，信令单协议扩展为 WS/QR/原生/本地 WSS 四载体）；**同 LAN 直接可见可连（修订 ADR-0006 PIN 门控；在线房间设备门控不变）**，可见性开关默认开、设置可关（`lt.lanVisible`）；数据面先 spike（WKWebView DataChannel，WebKit bug 174500 风险）→ 分支 A 全复用现有栈 / 分支 B 原生 TCP 数据面且电脑腿顺延；电脑腿 = app 本地 WSS 信令服务器（只转信令、数据仍 WebRTC 直连）+ `.local-certs` CA 签发证书 + 桌面 Chrome 一次性信任 CA + 地址输一次记住（`lt.localServer`）；UI 设备列表分「在线房间」「局域网发现」两区块（来源标注）：在线时在线房间为主、局域网区块仍显示，信令不可达（离线）时局域网区块为主（自动聚焦），桌面端显示「本地服务器连接的设备」区块（T08）；iOS + Android 同步（T03 真机验证跨平台互操作）
+- **局域网发现 + 本地信令服务器（ADR-0009，2026-08-16 已接受）**：app 原生层 mDNS/DNS-SD 发现（`_localtranfer._tcp` + TXT=name/id/kind/port/ver；iOS Network.framework / Android NsdManager），app↔app 离线免扫码直连（原生信令通道 TCP 交换 SDP，信令单协议扩展为 WS/QR/原生/本地 WSS 四载体）；**同 LAN 直接可见可连（修订 ADR-0006 PIN 门控；在线房间设备门控不变）**，可见性开关默认开、设置可关（`lt.lanVisible`）；数据面先 spike（WKWebView DataChannel，WebKit bug 174500 风险）→ 分支 A 全复用现有栈 / 分支 B 原生 TCP 数据面且电脑腿顺延；电脑腿 = app 本地 WSS 信令服务器（只转信令、数据仍 WebRTC 直连，**默认端口 9443** 与 app↔app 8443 分离）+ **app 内自签证书**（T07 spike 拍板：CA 首次启动 WebCrypto 生成并持久化、叶证书按启动/网络变更自动重签，SAN = `DNS:<deviceId>.local` + 当前 IP + 127.0.0.1，`.local` 使 DHCP 换 IP 免重签）+ 桌面一次性信任 CA 脚本（`scripts/trust-local-ca.sh`，macOS `security` / Windows `certutil`）+ 地址输一次记住（`lt.localServer`）；UI 设备列表分「在线房间」「局域网发现」两区块（来源标注）：在线时在线房间为主、局域网区块仍显示，信令不可达（离线）时局域网区块为主（自动聚焦），桌面端显示「本地服务器连接的设备」区块（T08）；iOS + Android 同步（T03 真机验证跨平台互操作）
 
 ## 开放问题（待拍板 / 待验证）
 1. ~~接收端 10GB 存储~~ **已由 spike 验证：iOS 17+ OPFS 配额宽松（真机写到 40GB+ 未触发上限，仅受设备剩余空间约束）**，接收端存储路线定为 OPFS + createSyncAccessHandle（Worker 内同步写）。SW 流式下载方案降级为可选优化（不再必需）。
@@ -101,5 +101,5 @@
 - **分块流式导出**：OPFS 磁盘背书 File 的 `stream()` 按固定块（默认 4 MiB）经 JS↔原生桥逐块写入目标文件，峰值内存 = 块大小，不整载文件（ADR-0008）
 - **局域网发现**：app 原生层经 mDNS/DNS-SD（`_localtranfer._tcp` + TXT 设备信息）发现同网段开着的 LocalTransfer 设备；浏览器无此能力，Chrome 网页只能主动连接（ADR-0009）
 - **原生信令通道**：app↔app 发现后经 TCP 直连交换 SDP/ICE 的通道——信令「单协议多载体」的第三种载体（WS / QR / 原生通道 / 本地 WSS，ADR-0009）
-- **本地信令服务器**：app 原生层监听 WSS 的信令宿主，供桌面 Chrome 主动连入；只中转 SDP/ICE，文件数据仍 WebRTC 直连（ADR-0009）
+- **本地信令服务器**：app 原生层监听 WSS 的信令宿主，供桌面 Chrome 主动连入；只中转 SDP/ICE，文件数据仍 WebRTC 直连（ADR-0009）；默认 9443（与 app↔app TCP 信令 8443 分离），证书 = app 内自签（T07：CA 持久化 + 叶证书自动重签，SAN 覆盖 `.local` 与当前 IP）
 - **可见性开关**：设置页开关（默认开，`lt.lanVisible`）；关 = 本机不出现在他人发现列表、也不主动发现（ADR-0009）

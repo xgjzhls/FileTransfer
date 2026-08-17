@@ -7,6 +7,7 @@
  */
 import { LanDiscovery } from 'lan-discovery'
 import type { LanTransport } from './lanSession'
+import type { LocalServerTransport } from './localServer'
 
 export const lanDiscoveryTransport: LanTransport = {
   startSignalingServer: (options) => LanDiscovery.startSignalingServer(options),
@@ -16,6 +17,16 @@ export const lanDiscoveryTransport: LanTransport = {
   connect: (options) => LanDiscovery.connect(options),
   disconnect: (options) => LanDiscovery.disconnect(options),
   sendMessage: (options) => LanDiscovery.sendMessage(options),
+  addListener: (eventName, listener) =>
+    LanDiscovery.addListener(eventName as never, listener as never),
+}
+
+/** T07 本地 WSS 服务器 transport（电脑腿 A；app 壳内） */
+export const lanLocalServerTransport: LocalServerTransport = {
+  startLocalServer: (options) => LanDiscovery.startLocalServer(options),
+  stopLocalServer: () => LanDiscovery.stopLocalServer(),
+  sendLocalMessage: (options) => LanDiscovery.sendLocalMessage(options),
+  getLocalAddresses: () => LanDiscovery.getLocalAddresses(),
   addListener: (eventName, listener) =>
     LanDiscovery.addListener(eventName as never, listener as never),
 }
