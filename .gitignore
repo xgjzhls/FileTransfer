@@ -34,7 +34,7 @@ server/.wrangler/
 build/
 
 # 本地插件 Xcode/SPM 元数据（xcodebuild 解析 SPM 时生成，勿入库）
-plugins/folder-export/.swiftpm/
+plugins/*/.swiftpm/
 
 # 本地插件 Android 构建产物（Gradle 生成，勿入库）
 plugins/lan-discovery/android/build/

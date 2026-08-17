@@ -19,7 +19,7 @@
 - **托管**：GitHub Pages（当前 legacy + `/docs`，见 CONTEXT.md「部署现状」）
 - **iOS app 壳（ADR-0008）**：Capacitor 8 打包同一套 Web 代码（WKWebView 承载）；app 内导出走原生文件夹选择 + 分块流式写（见 §4），网页版形态不变
 - **局域网发现（ADR-0009）**：iOS+Android app 原生 mDNS/DNS-SD（`_localtranfer._tcp`，TXT 携带设备名/ID/信令端口），app↔app 离线免扫码直连；发现后经**原生信令通道**交换 SDP（信令「单协议多载体」扩展：WS / QR / 原生通道 / 本地 WSS）
-- **本地信令服务器（ADR-0009）**：app 原生层监听 WSS（默认 8443，证书由本地 CA 签发），供桌面 Chrome 主动连入（输一次地址记住）；**只转信令**，文件数据仍 WebRTC 直连 —— 电脑腿离线免两跳
+- **本地信令服务器（ADR-0009）**：app 原生层监听 WSS（默认 9443，证书由本地 CA 签发），供桌面 Chrome 主动连入（输一次地址记住）；**只转信令**，文件数据仍 WebRTC 直连 —— 电脑腿离线免两跳（端口与 app↔app TCP 信令 8443 分离，§5.6）
 
 ## 3. 传输协议
 
@@ -168,12 +168,13 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 - **服务器**：app 原生层监听（iOS NWListener + TLS / Android SSLServerSocket，默认 9443，PORT_IN_USE 依次试 9444/9445），WSS，**只转信令**（SDP/ICE 在 Chrome 网页与 app 内 WKWebView 之间转发）；文件数据仍 WebRTC 直连（不违反「数据不经过任何中间设备」）。**端口与 app↔app TCP 信令（8443）分离**，避免双监听冲突（T07 备注「WSS 端口冲突/占用处理」落地）
 - **证书（T07 spike 拍板：app 内自签 + `.local` SAN）**：CA 由 app 首次启动时 WebCrypto 生成（ECDSA P-256）并持久化（`lt.localCa*`，CA 永不变 → 桌面一次性信任后换 IP/重签均无需再操作）；叶证书每次启动/网络变更自动重签，SAN = `DNS:<deviceId>.local` + 当前接口 IP + 127.0.0.1（`.local` 使 DHCP 换 IP 在 macOS 零操作；IP 路径重输地址，T08）；桌面一次性信任脚本 `scripts/trust-local-ca.sh`（macOS `security add-trusted-cert` / Windows `certutil -addstore -f Root`），CA 经 `https://<ip>:<port>/ca.crt` 下载（curl -k + SHA-256 指纹比对，指纹 app 界面显示）
 - **协议（RFC 6455，wire 与原生信令通道同构）**：桌面连 `wss://<addr>/ws?device=<deviceId>`（device 必须匹配本机 deviceId；app 界面展示完整地址可复制）；服务器另提供 `GET /`（设备信息 JSON）与 `GET /ca.crt`（CA PEM）；信令消息 = UTF-8 JSON 文本帧 `{v:1,type:"signal",kind, sdp}`（与 channel.ts SignalMessage 同构，sdp 与 WS/QR 同一压缩约定）；客户端帧必须掩码（违规 close 1002）；**单桌面客户端**（第二个连接 HTTP 503；握手 10s 超时断开）
-- **地址发现**：app 界面显示地址（`wss://<ip>:<port>/ws?device=<id>`，可复制），Chrome 输一次存 `lt.localServer`，重开自动重连；DHCP 换 IP 重输；失败降级现有 QR（§5.3）
+- **地址发现（T08 桌面端）**：app 界面显示地址（`wss://<ip>:<port>/ws?device=<id>`，可复制），Chrome 输一次存 `lt.localServer`，重开自动重连；断开自动退避重连（最多 5 次），连续失败 → 明确错误 + 提示重输（DHCP 换 IP）；失败一键降级现有 QR（§5.3，不阻塞传输）。桌面输入既接受完整 wss 地址（复制即用），也接受裸 `ip:端口` / `https://<ip>:<port>`（先取 `GET /` 设备信息补全 deviceId）。**桌面/浏览器（非 app）无法被 mDNS 发现，只能主动连入（纯浏览器限制，ADR-0009）**
+- **CORS（T08 补充）**：`GET /` 与 `GET /ca.crt` 带 `Access-Control-Allow-Origin: *`（简单 GET 无预检）——桌面 PWA 是 https 托管源，跨源 fetch 设备信息必需（WebSocket 不受 CORS 限制，仅信息/CA 下载需要）；无凭证、局域网零信任模型内可接受
 - **边界**：iOS 后台/锁屏监听受限（前台为主；退后台挂起、回前台按留存参数重建）；本地网络权限被拒（LOCAL_NETWORK_DENIED）→ 引导重开
 
 ## 6. 应用流程（UI）
 
-1. **首页（在线）**：PIN 输入框（输即加入，可「随机生成」）→ 同 PIN 设备列表（名称/类型/在线状态）→ 点选连接 → 传输区；记住的房间自动重入（ADR-0006），二次使用零操作；设备列表分「在线房间」「局域网发现」两区块（ADR-0009，app 端；来源标注）：在线时在线房间为主、局域网区块仍显示，信令不可达（离线）时局域网区块为主（自动聚焦）；桌面端浏览器无 mDNS 能力，该区块显示「本地服务器连接的设备」（T08 接入后列出电脑设备）
+1. **首页（在线）**：PIN 输入框（输即加入，可「随机生成」）→ 同 PIN 设备列表（名称/类型/在线状态）→ 点选连接 → 传输区；记住的房间自动重入（ADR-0006），二次使用零操作；设备列表分「在线房间」「局域网发现」两区块（ADR-0009，app 端；来源标注）：在线时在线房间为主、局域网区块仍显示，信令不可达（离线）时局域网区块为主（自动聚焦）；桌面端浏览器无 mDNS 能力，该区块为「本地服务器连接的设备」——地址输入 + 连接状态/错误重输（`lt.localServer` 记住、重开自动重连）＋已连设备列表（点选即建连，offer 经本地 WSS 中转，T08）＋失败一键降级扫码配对（§5.3）
 2. **首页（离线 / 信令不可用）**：显示「扫码配对」入口（轻量打磨版）与「局域网发现」区块（app 端，ADR-0009）；自动回房失败时降级至此
 3. **配对**：在线点选设备；离线走二维码（offer→answer 两次扫码，免选角色）
 4. **发送**：选文件（`<input type=file multiple>`；**选文件夹**：桌面 Chrome/Edge 走 File System Access（`showDirectoryPicker`）；iOS Safari 18.4+ / Android Chrome 走 `<input type=file webkitdirectory>`（浏览器递归返回目录树，`webkitRelativePath` 去掉首段即相对路径）；两者均不支持（如 iOS <18.4）自动降级多选文件 + 提示）→ 开始 → 每 part 进度。文件夹发送 name 为相对路径（`photos/2024/img.jpg`），接收端 OPFS 按 name 逐段重建目录

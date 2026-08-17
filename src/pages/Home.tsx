@@ -37,12 +37,23 @@ import type { PeerInfo, SignalPayload } from '../protocol/signaling'
 import { detectKind } from '../device'
 // T05 局域网发现（ADR-0009）：mDNS 发现 + 原生信令通道 → WebRTC 数据面（分支 A）
 import { CHANNEL_ERRORS, DEFAULT_SIGNALING_PORT } from 'lan-discovery'
-import { DEFAULT_LOCAL_SERVER_PORT } from 'lan-discovery'
+import { DEFAULT_LOCAL_SERVER_PORT, LOCAL_SERVER_ERRORS } from 'lan-discovery'
 import type { DeviceInfo as LanDeviceInfo, PeerConnectedEvent, TrackedDevice } from 'lan-discovery'
 import { LanDiscoverySession, describeLanError } from '../lan/lanSession'
 import { LocalServerSession } from '../lan/localServer'
 import { lanDiscoveryTransport, lanLocalServerTransport } from '../lan/lanTransport'
 import { getLanVisible } from '../lan/visibility'
+// T08 电脑腿 B：桌面 Chrome 本地服务器客户端（lt.localServer 记住 + 自动重连 + 失败降级 QR）
+import {
+  LOCAL_DESKTOP_PEER_ID,
+  LocalServerClient,
+  clearSavedLocalServer,
+  getSavedLocalServer,
+  parseLocalServerUrl,
+  saveLocalServer,
+  type LocalClientState,
+  type LocalDeviceInfo,
+} from '../lan/localClient'
 
 /** 信令服务地址（.env 注入，T03 部署；形如 wss://host/ws） */
 const SIGNALING_WSS = import.meta.env.VITE_SIGNALING_WSS ?? ''
@@ -203,6 +214,15 @@ export default function Home() {
   const localServerRef = useRef<LocalServerSession | null>(null)
   /** 桌面连接地址复制反馈（「已复制」气泡） */
   const [localCopied, setLocalCopied] = useState('')
+  // ── T08 桌面端「本地服务器连接的设备」（电脑腿 B）：客户端状态/设备/错误/输入 ──
+  const [localUrlInput, setLocalUrlInput] = useState(() => getSavedLocalServer())
+  const [localState, setLocalState] = useState<LocalClientState>('idle')
+  const [localDevice, setLocalDevice] = useState<LocalDeviceInfo | null>(null)
+  const [localError, setLocalError] = useState('')
+  const localClientRef = useRef<LocalServerClient | null>(null)
+  /** T08：失败降级 QR 的一键入口（token 变化 → OfflinePair 打开面板 + 滚动到该区块） */
+  const [qrToken, setQrToken] = useState(0)
+  const qrSectionRef = useRef<HTMLDivElement>(null)
   /** 正在点选连接的设备 id（按钮态） */
   const [lanConnecting, setLanConnecting] = useState<string | null>(null)
   /** 已建立原生信令通道的 peerId（UI「已连接」标记；瞬态幂等） */
@@ -213,8 +233,8 @@ export default function Home() {
   /** T06：本地网络权限被拒标记（专属引导区块，优先于普通错误文案渲染） */
   const [lanPermissionDenied, setLanPermissionDenied] = useState(false)
   const lanSessionRef = useRef<LanDiscoverySession | null>(null)
-  /** 当前连接的信令载体：ws = 在线房间；lan = 原生信令通道（SDP 经 TCP） */
-  const transportRef = useRef<'ws' | 'lan'>('ws')
+  /** 当前连接的信令载体：ws = 在线房间；lan = 原生信令通道（SDP 经 TCP）；local = 本地 WSS 服务器（T08） */
+  const transportRef = useRef<'ws' | 'lan' | 'local'>('ws')
   /** LAN 断线重连尝试计数（成功 connected 归零；封顶 3 次转手动） */
   const lanReconnectAttemptsRef = useRef(0)
   /** 等待重新发现的设备（peerId → 时间戳）；重新发现后自动重连 */
@@ -342,9 +362,18 @@ export default function Home() {
         onClientChange: (connected) => {
           if (localServerRef.current !== session) return
           setLocalServer((s) => ({ ...s, clientConnected: connected }))
+          if (!connected) {
+            // T08：桌面已离开 → 中断在途传输；桌面重连后会重新发起（桌面为发起方）
+            if (peerIdRef.current === LOCAL_DESKTOP_PEER_ID) {
+              interruptedRef.current = true
+              abortRef.current?.abort()
+              setLanStatus('电脑连接已断开：等电脑重连后自动续传（或让电脑端重新点「连接」）')
+            }
+          }
         },
-        onSignal: (_payload) => {
-          // T08：桌面 offer/answer 在此交给 ConnectionManager（与原生信令通道同构接线）
+        onSignal: (payload) => {
+          if (localServerRef.current !== session) return
+          handleLocalSignal(payload)
         },
         onError: (code, message) => {
           if (localServerRef.current !== session) return
@@ -372,6 +401,46 @@ export default function Home() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lanVisible])
+
+  // T08：桌面 Chrome 本地服务器客户端（电脑腿 B）——非壳环境生效。
+  // 输一次地址（lt.localServer 记住）→ 重开页面自动重连；断开自动退避重连；
+  // 连续失败 → offline（明确错误 + 提示重输，DHCP 换 IP 场景）+ 一键回 QR（§5.3）。
+  useEffect(() => {
+    if (IS_NATIVE) return
+    const client = new LocalServerClient({
+      createSocket: createBrowserSocket,
+      events: {
+        onState: (s) => {
+          setLocalState(s)
+          if (s === 'connected') {
+            // 记住成功地址（重开页面自动重连；lt.localServer）
+            saveLocalServer(client.wsUrl)
+            setLocalError('')
+            // 重连后 WebRTC 未恢复 → 桌面（发起方）自动重新 offer（同 lan 语义，自动续传）
+            if (connStateRef.current !== 'connected' && peerIdRef.current) {
+              void ensureManager().reconnectTo(peerIdRef.current).catch(() => {})
+            }
+          }
+        },
+        onDevice: (d) => setLocalDevice(d),
+        onSignal: (payload) => {
+          transportRef.current = 'local'
+          peerIdRef.current = client.device?.id ?? LOCAL_DESKTOP_PEER_ID
+          routeSignal(peerIdRef.current, payload, setLocalError)
+        },
+        onError: (m) => setLocalError(m),
+      },
+    })
+    localClientRef.current = client
+    const saved = getSavedLocalServer()
+    if (saved) client.connect(saved) // 重开页面自动重连上次地址
+    return () => {
+      client.close()
+      localClientRef.current = null
+    }
+    // handlers 只依赖 refs 与稳定 setter，首帧闭包安全
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // e2e 测试钩子（scripts/e2e.mjs 断线重连用例）：仅 dev 构建暴露，生产无
   useEffect(() => {
@@ -550,6 +619,20 @@ export default function Home() {
                   }
                 })
                 .catch((err) => setLanError(err instanceof Error ? err.message : String(err)))
+            } else if (transportRef.current === 'local') {
+              // T08：本地 WSS 服务器路径（SPEC §5.6）——app↔桌面单客户端，to 无关。
+              // app 端经 LocalServerSession 中继；桌面端经 LocalServerClient 直发。
+              if (IS_NATIVE) {
+                void localServerRef.current?.sendSignal(payload).then((r) => {
+                  // NO_CLIENT = 桌面已离开的瞬态：静默（桌面重连后由它重新发起）
+                  if (r && !r.ok && r.error !== LOCAL_SERVER_ERRORS.NO_CLIENT) {
+                    setLocalServer((s) => ({ ...s, error: r.error ?? '发送信令失败' }))
+                  }
+                })
+              } else {
+                // 未连接时本地客户端静默丢弃（重连后 onState('connected') 自动重新 offer）
+                localClientRef.current?.signal(payload)
+              }
             } else {
               reconnectRef.current?.signal(to, payload)
             }
@@ -645,6 +728,16 @@ export default function Home() {
           // 原生通道也断了 → 重新发现/原生重连 → peerConnected 驱动新 offer → 续传
           void reconnectLan(peerId)
         }
+      } else if (transportRef.current === 'local' && peerIdRef.current) {
+        if (IS_NATIVE) {
+          // app 端（接收方）：桌面（发起方）驱动重连与重新 offer——本端只标记中断等桌面，
+          // 避免双 offer glare（RtcPeer 无 glare 消解，两份并发 offer 会互相覆盖 peer）
+          setLanStatus('与本机电脑的连接已断开，等待电脑重新发起连接…')
+        } else if (localClientRef.current?.state === 'connected') {
+          // 桌面端（发起方）：本地信令仍在线（WebRTC 数据面单独失败）→ 立即重新 offer（同 lan 语义）
+          void ensureManager().reconnectTo(peerIdRef.current).catch(() => {})
+        }
+        // 桌面端 WS 也断了：等 LocalServerClient onState('connected') 内自动重新 offer（重连自动续传）
       } else if (wsState === 'connected' && peerIdRef.current) {
         // 信令在线且有对端 → 自动重建 DataChannel（重新 offer）
         if (connState === 'failed') {
@@ -797,6 +890,79 @@ export default function Home() {
     setLanConnecting((cur) => (cur === from ? null : cur))
     setLanConnectedIds((prev) => new Set(prev).add(from))
     routeSignal(from, payload, setLanError)
+  }
+
+  /**
+   * T08：app 本地服务器收到桌面 offer/answer → WebRTC 握手（SPEC §5.6）。
+   * 桌面为发起方（offer 方），本端回 answer；桌面重连后由它重新发起，本端只应答。
+   */
+  function handleLocalSignal(payload: SignalPayload) {
+    transportRef.current = 'local'
+    peerIdRef.current = LOCAL_DESKTOP_PEER_ID
+    setLanConnecting((cur) => (cur === LOCAL_DESKTOP_PEER_ID ? null : cur))
+    routeSignal(LOCAL_DESKTOP_PEER_ID, payload, setError)
+  }
+
+  // ── T08 桌面端本地服务器操作（电脑腿 B）：连接 / 点选设备 / 忘记地址 / 降级 QR ──
+
+  /** 输入地址 → 本地客户端连接（HOME 先做格式校验，明确提示替代静默失败） */
+  function connectLocalServer() {
+    const input = localUrlInput.trim()
+    if (!input) {
+      setLocalError('请输入地址（从手机 App 首页「电脑腿连接」复制）')
+      return
+    }
+    if (!parseLocalServerUrl(input)) {
+      setLocalError('地址格式不正确：需 wss://主机:端口/ws?device=…（请从 app 复制完整地址，或输入 主机:端口）')
+      return
+    }
+    setLocalError('')
+    localClientRef.current?.connect(input)
+  }
+
+  /** 点选本地服务器设备：桌面为 offer 方，offer 经本地 WSS 中转（与在线/LAN 同 ConnectionManager） */
+  async function connectToLocalDevice() {
+    const dev = localDevice
+    if (!dev || localState !== 'connected') return
+    transportRef.current = 'local'
+    peerIdRef.current = dev.id
+    setError('')
+    setLocalError('')
+    // 已有在途发送 → 标记中断 + 取消旧发送循环（新连接建立后自动走 resumeSend 续传，同 WS 语义）
+    if (controllerRef.current?.hasActiveSend()) {
+      interruptedRef.current = true
+      abortRef.current?.abort()
+    }
+    try {
+      await ensureManager().connectTo(dev.id)
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** 忘记地址：断开客户端 + 清 WebRTC 会话 + 清除 lt.localServer（下次需重输） */
+  function forgetLocalServer() {
+    if (transportRef.current === 'local' && peerIdRef.current) {
+      // 同 connectTo 语义：在途发送 → 标记中断 + 取消发送循环（重新连接后自动 resume 续传）
+      if (controllerRef.current?.hasActiveSend()) {
+        interruptedRef.current = true
+        abortRef.current?.abort()
+      }
+      managerRef.current?.close()
+      peerIdRef.current = null
+    }
+    localClientRef.current?.close()
+    clearSavedLocalServer()
+    setLocalDevice(null)
+    setLocalState('idle')
+    setLocalError('')
+    setError('')
+  }
+
+  /** T08 验收 3：本地服务器路径失败 → 一键回到 QR 两跳（打开面板 + 滚动到位，不阻塞传输） */
+  function fallbackToQr() {
+    setQrToken((t) => t + 1)
+    qrSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
   /**
@@ -1639,16 +1805,98 @@ export default function Home() {
     </div>
   ) : null
 
-  /** 桌面端：本地服务器连接的设备（T08 接入后显示；无发现能力时不出空误导文案，T06 验收 4） */
+  /**
+   * 桌面端「本地服务器连接的设备」（T08 电脑腿 B）：输一次地址（lt.localServer 记住）→
+   * 自动重连 → 失败明确错误 + 重输提示（DHCP 换 IP）+ 一键降级 QR。手机 App 作为服务端，
+   * 电脑为发起方：点选设备 → offer → 手机回 answer → WebRTC 直连（数据不经过本地服务器）。
+   */
   const desktopBlock = !IS_NATIVE ? (
     <div className="device-block">
-      <span className="block-title">
-        本地服务器连接的设备 <span className="badge">电脑腿</span>
-      </span>
-      <p className="muted">
-        桌面端浏览器无 mDNS 发现能力：由手机 App 内的本地信令服务器（WSS）接入。此区块将在「电脑腿」接入（T08）后
-        显示已连接的电脑设备；当前请{signalingDown ? '使用下方「离线扫码配对」' : '使用上方「在线房间」或下方「离线扫码配对」'}。
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <span className="block-title">
+          本地服务器连接的设备 <span className="badge">电脑腿</span>
+          {localState === 'connected' && <span className="badge ok">信令已连</span>}
+        </span>
+        {localState !== 'idle' && (
+          <button onClick={forgetLocalServer} style={{ padding: '2px 10px', fontSize: 12 }}>
+            忘记地址
+          </button>
+        )}
+      </div>
+      <p className="muted" style={{ fontSize: 12 }}>
+        电脑端无法被局域网自动发现：从手机 App 首页「电脑腿连接」复制地址（wss://…），粘贴一次即记住，
+        重开页面自动重连。首次使用需先在电脑上运行{' '}
+        <code style={{ fontSize: 10 }}>bash scripts/trust-local-ca.sh</code> 信任证书。
       </p>
+      <div className="row" style={{ gap: 6 }}>
+        <input
+          value={localUrlInput}
+          onChange={(e) => setLocalUrlInput(e.target.value)}
+          placeholder="wss://192.168.x.x:9443/ws?device=…"
+          style={{ flex: 1, minWidth: 0 }}
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="off"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void connectLocalServer()
+          }}
+        />
+        <button
+          onClick={() => void connectLocalServer()}
+          disabled={localState === 'connecting' || localState === 'reconnecting'}
+        >
+          {localState === 'reconnecting' ? '重连中…' : '连接'}
+        </button>
+      </div>
+      {localState === 'connecting' && <p className="muted">正在连接本地服务器…（首次连接请确认已信任证书）</p>}
+      {localState === 'reconnecting' && (
+        <p className="muted">连接断开，自动重连中…（长时间连不上请确认手机 App 在线）</p>
+      )}
+      {localState === 'connected' && localDevice && (
+        <p className="ok">✓ 已连接手机信令（{localDevice.name}）</p>
+      )}
+      {localError && <p className="bad">{localError}</p>}
+      {localState === 'offline' && (
+        <div className="row" style={{ gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+          <button onClick={() => localClientRef.current?.retry()} style={{ padding: '4px 10px', fontSize: 12 }}>
+            重新连接
+          </button>
+          <button onClick={fallbackToQr} style={{ padding: '4px 10px', fontSize: 12 }}>
+            改用离线扫码配对
+          </button>
+          <span className="muted" style={{ fontSize: 12, alignSelf: 'center' }}>
+            或重新输入上方地址（DHCP 换 IP 后需重输）
+          </span>
+        </div>
+      )}
+      {localDevice && (
+        <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
+          <li className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
+            <span>
+              <span className="ok" style={{ marginRight: 6 }}>●</span>
+              {localDevice.name}{' '}
+              <span className="badge" style={{ padding: '1px 8px', fontSize: 11 }}>
+                本地服务器
+              </span>{' '}
+              <span className="muted">({localDevice.kind} · :{localDevice.port})</span>
+            </span>
+            <button
+              onClick={() => void connectToLocalDevice()}
+              disabled={
+                localState !== 'connected' ||
+                connState === 'signaling' ||
+                connState === 'connecting'
+              }
+            >
+              {connState === 'connected'
+                ? '已连接'
+                : connState === 'signaling' || connState === 'connecting'
+                  ? '连接中…'
+                  : '连接'}
+            </button>
+          </li>
+        </ul>
+      )}
     </div>
   ) : null
 
@@ -1685,7 +1933,14 @@ export default function Home() {
       </section>
 
       {/* T07：离线二维码配对（无信令服务时；建连后完全复用在线数据面） */}
-      <OfflinePair manager={() => ensureManager()} connState={connState} deviceKind={device.kind} />
+      <div ref={qrSectionRef}>
+        <OfflinePair
+          manager={() => ensureManager()}
+          connState={connState}
+          deviceKind={device.kind}
+          openToken={qrToken}
+        />
+      </div>
 
       <section className="card">
         <h2>传输</h2>

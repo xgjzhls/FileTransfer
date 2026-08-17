@@ -1320,9 +1320,14 @@ public class CAPLanDiscoveryPlugin: CAPPlugin, CAPBridgedPlugin {
         default: reason = "Error"
         }
         let payload = body ?? ""
+        // T08：桌面 Chrome 页（https 托管源）跨源读取设备信息 / CA——必须放行 CORS；
+        // 请求为简单 GET（无自定义头/非 JSON content-type），无需 OPTIONS 预检——
+        // 加 Allow-Origin 即可让 fetch 拿到 body（仅限局域网零信任模型内，无凭证）
         let response =
             "HTTP/1.1 \(status) \(reason)\r\n" +
             "Content-Type: \(contentType)\r\n" +
+            "Access-Control-Allow-Origin: *\r\n" +
+            "Access-Control-Allow-Methods: GET, OPTIONS\r\n" +
             "Content-Length: \(payload.utf8.count)\r\n" +
             "Connection: close\r\n\r\n" + payload
         connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in

@@ -431,7 +431,8 @@ function isLanAddress(ip: string): boolean {
   return /^\d+\.\d+\.\d+\.\d+$/.test(ip) && ip !== '127.0.0.1' && !ip.startsWith('169.254.')
 }
 
-function defaultStorage(): LocalServerStorage {
+/** 浏览器默认存储（localStorage 形状；localClient 复用——T08 评审去重） */
+export function defaultStorage(): LocalServerStorage {
   return {
     getItem: (k) => (typeof localStorage !== 'undefined' ? localStorage.getItem(k) : null),
     setItem: (k, v) => {

@@ -186,7 +186,10 @@ try {
   step('T11 双页输入同码：A 设备列表出现 B', true)
 
   // ── 4. T11 A 点连接 → 两端 connected（修复 gather 后连接很快，不中途等 signaling）
-  await pageA.getByRole('button', { name: '连接' }).click()
+  // 注意：T08 后桌面端多了一个「本地服务器连接」输入按钮，也显示「连接」——
+  // 用对端所在 li 限定，避免 strict mode 撞多个按钮
+  const peerRowA = pageA.locator('li', { hasText: 'E2E-B' })
+  await peerRowA.getByRole('button', { name: '连接' }).click()
   if (webrtcOk) {
     await waitStatus(pageA, 'connected')
     await waitStatus(pageB, 'connected')
@@ -194,6 +197,10 @@ try {
 
     // ── 5. A 选文件发送 → B 接收完成（B 端显示「导出」按钮）
     await pageA.setInputFiles('input[type="file"]', srcPath)
+    // 等待文件进入发送队列（onChange 已处理）再点发送，避免点击与列表重渲染竞态
+    await pageA.waitForFunction((name) => document.body.textContent?.includes(name), 'e2e-source.bin', {
+      timeout: 10000,
+    })
     await pageA.getByRole('button', { name: '开始发送' }).click()
     await pageB.waitForFunction(() => document.body.textContent?.includes('导出'), null, {
       timeout: 60000,
@@ -214,6 +221,9 @@ try {
     const srcResume = join(dir, 'e2e-resume.bin')
     writeFileSync(srcResume, randomBytes(20 * 1024 * 1024)) // 20 MiB（给中断留时间）
     await pageA.setInputFiles('input[type="file"]', srcResume)
+    await pageA.waitForFunction((name) => document.body.textContent?.includes(name), 'e2e-resume.bin', {
+      timeout: 10000,
+    })
     await pageA.getByRole('button', { name: '开始发送' }).click()
     // 等 B 出现接收进度，再等一个节流周期（2s）确保位图已落盘 IndexedDB
     await pageB.waitForFunction(() => /chunk/.test(document.body.textContent ?? ''), null, {
@@ -274,13 +284,15 @@ try {
     // T06：A 的对端同 id 重连后等「连接」按钮可点，重新连接 → 自动续传
     await pageA.waitForFunction(
       () => {
-        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent?.trim() === '连接')
+        // 限定对端所在行（T08 桌面端另有「本地服务器连接」的「连接」按钮）
+        const row = [...document.querySelectorAll('li')].find((li) => li.textContent?.includes('E2E-B'))
+        const btn = row?.querySelector('button')
         return btn !== undefined && !btn.disabled
       },
       null,
       { timeout: 20000 },
     )
-    await pageA.getByRole('button', { name: '连接' }).click()
+    await pageA.locator('li', { hasText: 'E2E-B' }).getByRole('button', { name: '连接' }).click()
     await waitStatus(pageA, 'connected')
     // A 连接恢复 → 自动 resumeSend（同 sessionId）→ B 从断点继续直到完成
     await pageB.waitForFunction(() => document.body.textContent?.includes('导出'), null, {

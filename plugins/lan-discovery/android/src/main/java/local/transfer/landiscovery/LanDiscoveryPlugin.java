@@ -1935,8 +1935,12 @@ public class LanDiscoveryPlugin extends Plugin {
         }
         String payload = body == null ? "" : body;
         byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8);
+        // T08：桌面 Chrome 页（https 托管源）跨源读取设备信息 / CA——必须放行 CORS；
+        // 简单 GET 无预检，加 Allow-Origin 即可让 fetch 拿到 body（局域网零信任模型内，无凭证）
         String response = "HTTP/1.1 " + status + " " + reason + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
+                + "Access-Control-Allow-Origin: *\r\n"
+                + "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
                 + "Content-Length: " + payloadBytes.length + "\r\n"
                 + "Connection: close\r\n\r\n";
         socket.getOutputStream().write(response.getBytes(StandardCharsets.UTF_8));

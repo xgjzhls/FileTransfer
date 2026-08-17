@@ -64,9 +64,14 @@ interface OfflinePairProps {
   connState: string
   /** 本端设备类型（T14 分工默认主路径；Home 传入与设备上报一致的值，缺省自检） */
   deviceKind?: DeviceKind
+  /**
+   * T08：外部自动打开面板的令牌（Home 的「改用离线扫码配对」一键降级）——
+   * 值变化即打开（setEverOpened(true) + setOpen(true)），与手动点击同语义。
+   */
+  openToken?: number
 }
 
-export default function OfflinePair({ manager, connState, deviceKind }: OfflinePairProps) {
+export default function OfflinePair({ manager, connState, deviceKind, openToken }: OfflinePairProps) {
   const [open, setOpen] = useState(false)
   /** 本次挂载是否打开过配对面板：离线断连警告仅在用过离线配对后出现（不打扰纯在线用户） */
   const [everOpened, setEverOpened] = useState(false)
@@ -201,6 +206,13 @@ export default function OfflinePair({ manager, connState, deviceKind }: OfflineP
   useEffect(() => {
     if (!open) setScanning(false)
   }, [open])
+
+  // T08：Home「改用离线扫码配对」一键打开本面板（token 变化即触发）
+  useEffect(() => {
+    if (!openToken) return
+    setEverOpened(true)
+    setOpen(true)
+  }, [openToken])
 
   // T21：相位切换 / 面板收起时关闭全屏（全屏内容不得与当前相位脱节）
   useEffect(() => {
