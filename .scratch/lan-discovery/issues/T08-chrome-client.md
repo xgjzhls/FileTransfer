@@ -1,4 +1,4 @@
-# T08: 电脑腿 B —— Chrome 端连接（输一次记住 + 重连 + 降级）
+# T08: 电脑端 B —— Chrome 端连接（输一次记住 + 重连 + 降级）
 
 - 状态：✅ 代码完成（2026-08-17：src/lan/localClient.ts（地址解析/`lt.localServer` 持久化/退避重连 ≤5 次转 offline/GET / 设备信息 + URL 兜底/wire 信令收发，20 单测）；Home 桌面「本地服务器连接的设备」区块（地址输入 + 内联校验 + 信令已连/设备卡片/点选建连/忘记地址/失败重输提示 + 一键降级 QR）；app 端 LocalServerSession.onSignal 接线（桌面 offer/answer → ConnectionManager，桌面为发起方、app 回 answer）+ transport 'local' 路由 + 断线中断续传；传输：本地 WSS 只转信令、WebRTC 直连（smoke 实测：chromium+假服务器，GET / 设备信息 → wss 连入 → 压缩 sdp offer 经服务器转发 ✓）；**原生 CORS 补丁**：iOS/Android 服务器 GET `/` 与 `/ca.crt` 增加 `Access-Control-Allow-Origin: *`（桌面 PWA 跨源 fetch 必需；Swift parse + javac 验证通过）；offline 降级入口 OfflinePair openToken；e2e 按钮定位收敛 + 选择文件后等列表更新再点发送（消竞态））；**待验项 = 真机**（T09 承接）：app 起服务器 → 桌面 Chrome 连入 → 转发 SDP → 传文件 SHA-256 一致（1GB）；CA 信任全链路；DHCP 换 IP 重输；Windows Chrome + Bonjour `.local` 解析
 

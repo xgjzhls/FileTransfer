@@ -43,7 +43,7 @@ import { LanDiscoverySession, describeLanError } from '../lan/lanSession'
 import { LocalServerSession } from '../lan/localServer'
 import { lanDiscoveryTransport, lanLocalServerTransport } from '../lan/lanTransport'
 import { getLanVisible } from '../lan/visibility'
-// T08 电脑腿 B：桌面 Chrome 本地服务器客户端（lt.localServer 记住 + 自动重连 + 失败降级 QR）
+// T08 电脑端 B：桌面 Chrome 本地服务器客户端（lt.localServer 记住 + 自动重连 + 失败降级 QR）
 import {
   LOCAL_DESKTOP_PEER_ID,
   LocalServerClient,
@@ -202,7 +202,7 @@ export default function Home() {
   const [lanError, setLanError] = useState('')
   /** 信令服务器监听端口（null = 未监听；启动失败提示用） */
   const [lanPort, setLanPort] = useState<number | null>(null)
-  // ── T07 本地 WSS 服务器（电脑腿 A）：地址/指纹/客户端连接态 ──
+  // ── T07 本地 WSS 服务器（电脑端 A）：地址/指纹/客户端连接态 ──
   const [localServer, setLocalServer] = useState<{
     running: boolean
     port: number | null
@@ -214,7 +214,7 @@ export default function Home() {
   const localServerRef = useRef<LocalServerSession | null>(null)
   /** 桌面连接地址复制反馈（「已复制」气泡） */
   const [localCopied, setLocalCopied] = useState('')
-  // ── T08 桌面端「本地服务器连接的设备」（电脑腿 B）：客户端状态/设备/错误/输入 ──
+  // ── T08 桌面端「本地服务器连接的设备」（电脑端 B）：客户端状态/设备/错误/输入 ──
   const [localUrlInput, setLocalUrlInput] = useState(() => getSavedLocalServer())
   const [localState, setLocalState] = useState<LocalClientState>('idle')
   const [localDevice, setLocalDevice] = useState<LocalDeviceInfo | null>(null)
@@ -351,7 +351,7 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lanVisible])
 
-  // T07：app 本地 WSS 信令服务器（电脑腿 A）——与发现会话同生命周期（lanVisible 门控）。
+  // T07：app 本地 WSS 信令服务器（电脑端 A）——与发现会话同生命周期（lanVisible 门控）。
   // 桌面 Chrome 连入此服务器（地址/CA 指纹见下方 UI）；信令中继给调用方（T08 接 WebRTC）。
   useEffect(() => {
     if (!IS_NATIVE) return
@@ -402,7 +402,7 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lanVisible])
 
-  // T08：桌面 Chrome 本地服务器客户端（电脑腿 B）——非壳环境生效。
+  // T08：桌面 Chrome 本地服务器客户端（电脑端 B）——非壳环境生效。
   // 输一次地址（lt.localServer 记住）→ 重开页面自动重连；断开自动退避重连；
   // 连续失败 → offline（明确错误 + 提示重输，DHCP 换 IP 场景）+ 一键回 QR（§5.3）。
   useEffect(() => {
@@ -903,13 +903,13 @@ export default function Home() {
     routeSignal(LOCAL_DESKTOP_PEER_ID, payload, setError)
   }
 
-  // ── T08 桌面端本地服务器操作（电脑腿 B）：连接 / 点选设备 / 忘记地址 / 降级 QR ──
+  // ── T08 桌面端本地服务器操作（电脑端 B）：连接 / 点选设备 / 忘记地址 / 降级 QR ──
 
   /** 输入地址 → 本地客户端连接（HOME 先做格式校验，明确提示替代静默失败） */
   function connectLocalServer() {
     const input = localUrlInput.trim()
     if (!input) {
-      setLocalError('请输入地址（从手机 App 首页「电脑腿连接」复制）')
+      setLocalError('请输入地址（从手机 App 首页「电脑端连接」复制）')
       return
     }
     if (!parseLocalServerUrl(input)) {
@@ -1712,12 +1712,12 @@ export default function Home() {
                   信令服务器：:{lanPort}（SRV = TXT 端口）
                 </p>
               )}
-              {/* T07 电脑腿 A：本地 WSS 信令服务器（桌面 Chrome 连入；地址 + CA 指纹 + 客户端态） */}
+              {/* T07 电脑端 A：本地 WSS 信令服务器（桌面 Chrome 连入；地址 + CA 指纹 + 客户端态） */}
               {IS_NATIVE && (
                 <div style={{ margin: '8px 0', padding: 8, border: '1px dashed #8884', borderRadius: 8 }}>
                   <div className="row" style={{ justifyContent: 'space-between' }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>
-                      电脑腿连接{' '}
+                      电脑端连接{' '}
                       <span className="badge ok">本地服务器</span>
                     </span>
                     {localServer.clientConnected && <span className="badge ok">● 电脑已连接</span>}
@@ -1806,7 +1806,7 @@ export default function Home() {
   ) : null
 
   /**
-   * 桌面端「本地服务器连接的设备」（T08 电脑腿 B）：输一次地址（lt.localServer 记住）→
+   * 桌面端「本地服务器连接的设备」（T08 电脑端 B）：输一次地址（lt.localServer 记住）→
    * 自动重连 → 失败明确错误 + 重输提示（DHCP 换 IP）+ 一键降级 QR。手机 App 作为服务端，
    * 电脑为发起方：点选设备 → offer → 手机回 answer → WebRTC 直连（数据不经过本地服务器）。
    */
@@ -1814,7 +1814,7 @@ export default function Home() {
     <div className="device-block">
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <span className="block-title">
-          本地服务器连接的设备 <span className="badge">电脑腿</span>
+          本地服务器连接的设备 <span className="badge">电脑端</span>
           {localState === 'connected' && <span className="badge ok">信令已连</span>}
         </span>
         {localState !== 'idle' && (
@@ -1824,7 +1824,7 @@ export default function Home() {
         )}
       </div>
       <p className="muted" style={{ fontSize: 12 }}>
-        电脑端无法被局域网自动发现：从手机 App 首页「电脑腿连接」复制地址（wss://…），粘贴一次即记住，
+        电脑端无法被局域网自动发现：从手机 App 首页「电脑端连接」复制地址（wss://…），粘贴一次即记住，
         重开页面自动重连。首次使用需先在电脑上运行{' '}
         <code style={{ fontSize: 10 }}>bash scripts/trust-local-ca.sh</code> 信任证书。
       </p>

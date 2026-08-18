@@ -62,7 +62,7 @@ export const LAN_CHANNEL_EVENTS = {
   signalingError: 'signalingError',
 } as const
 
-/** 本地 WSS 服务器事件名常量（T07 电脑腿 A 订阅用；原生只转信令） */
+/** 本地 WSS 服务器事件名常量（T07 电脑端 A 订阅用；原生只转信令） */
 export const LOCAL_SERVER_EVENTS = {
   clientConnected: 'localClientConnected',
   clientDisconnected: 'localClientDisconnected',
@@ -70,7 +70,7 @@ export const LOCAL_SERVER_EVENTS = {
   serverError: 'localServerError',
 } as const
 
-/** 本地服务器（WSS 电脑腿）事件类型 */
+/** 本地服务器（WSS 电脑端）事件类型 */
 export interface LocalClientConnectedEvent {
   /** 桌面端点地址（IP:port，展示/日志用） */
   address?: string
@@ -98,7 +98,7 @@ export interface LanDiscoveryStatus {
   permissionDenied: boolean
   /** T04：信令服务器是否在监听（SRV/TXT 端口一致，SPEC §5.5） */
   signaling: boolean
-  /** T07：本地 WSS 服务器（电脑腿）是否在监听 */
+  /** T07：本地 WSS 服务器（电脑端）是否在监听 */
   localServer: boolean
 }
 
@@ -106,7 +106,7 @@ export interface LanDiscoveryStatus {
 export const PERMISSION_DENIED_MARKER = 'LOCAL_NETWORK_DENIED'
 
 // ---------------------------------------------------------------------------
-// 本地 WSS 服务器（T07 电脑腿 A，ADR-0009 决策 4）API 形状
+// 本地 WSS 服务器（T07 电脑端 A，ADR-0009 决策 4）API 形状
 // ---------------------------------------------------------------------------
 
 /**
@@ -206,7 +206,7 @@ export interface LanDiscoveryPlugin {
   startBrowsing(): Promise<StartResult>
   stopBrowsing(): Promise<{ ok: boolean }>
   /**
-   * T07：启动本地 WSS 服务器（电脑腿 A，只转信令）。
+   * T07：启动本地 WSS 服务器（电脑端 A，只转信令）。
    * 端口被占 → {ok:false, error:'PORT_IN_USE'}（JS 依次试 9444/9445）；
    * 本地网络权限被拒 → {ok:false, error:'LOCAL_NETWORK_DENIED'}。
    */
@@ -309,7 +309,7 @@ export const LanDiscovery: LanDiscoveryPlugin = new Proxy(rawLanDiscovery, {
         return target.sendMessage(options)
       }
     }
-    // T07 本地服务器（电脑腿）：证书 PEM 合法性 + 消息大小前置校验
+    // T07 本地服务器（电脑端）：证书 PEM 合法性 + 消息大小前置校验
     if (prop === 'startLocalServer') {
       return async (options: LocalServerOptions) => {
         try {

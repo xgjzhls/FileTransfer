@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# 一次性信任 LocalTransfer App 的本地 CA（电脑腿 A，T07 验收 4，ADR-0009 决策 4）。
+# 一次性信任 LocalTransfer App 的本地 CA（电脑端 A，T07 验收 4，ADR-0009 决策 4）。
 #
 # 背景：桌面 Chrome（https PWA）连 app 本地 WSS 信令服务器（wss://<ip>:<port>/ws?device=<id>）
 # 需要可信证书；app 首次启动自签 CA + 叶证书（CA 持久化，永不变）——本脚本把该 CA 装进
 # 系统信任库一次，之后 app 换 IP/重签叶证书都不需要再操作。
 #
 # 用法（任选其一）：
-#   1. 从 App 界面复制 CA 指纹（app 首页「电脑腿连接」区块），再指定地址下载：
+#   1. 从 App 界面复制 CA 指纹（app 首页「电脑端连接」区块），再指定地址下载：
 #      bash scripts/trust-local-ca.sh https://192.168.1.5:9443/ca.crt AA:BB:CC:...:FF
 #   2. 已有 ca.crt 文件（例如开发仓库的 .local-certs/ca.crt）：
 #      bash scripts/trust-local-ca.sh /path/to/ca.crt

@@ -21,7 +21,7 @@ export const lanDiscoveryTransport: LanTransport = {
     LanDiscovery.addListener(eventName as never, listener as never),
 }
 
-/** T07 本地 WSS 服务器 transport（电脑腿 A；app 壳内） */
+/** T07 本地 WSS 服务器 transport（电脑端 A；app 壳内） */
 export const lanLocalServerTransport: LocalServerTransport = {
   startLocalServer: (options) => LanDiscovery.startLocalServer(options),
   stopLocalServer: () => LanDiscovery.stopLocalServer(),

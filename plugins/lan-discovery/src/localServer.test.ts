@@ -1,5 +1,5 @@
 /**
- * 本地 WSS 服务器 facade 层（T07 电脑腿 A）参数校验单测：
+ * 本地 WSS 服务器 facade 层（T07 电脑端 A）参数校验单测：
  * startLocalServer 的 PEM/设备校验、sendLocalMessage 的 ≤64KiB 校验、
  * 默认端口池（与 app↔app TCP 信令 8443 分离）、事件名常量。
  */

@@ -1,6 +1,6 @@
-# T07: 电脑腿 A —— app 本地 WSS 信令服务器 + 证书
+# T07: 电脑端 A —— app 本地 WSS 信令服务器 + 证书
 
-- 状态：✅ 代码完成（2026-08-17：spike 定机制 + cert.ts WebCrypto 自签（DER/X509 手工构建，Node/OpenSSL oracle 15 测试）+ 桥 API（startLocalServer/stopLocalServer/sendLocalMessage/getLocalAddresses + 3 事件，facade 校验 8 测试）+ iOS 原生 WSS（NWListener TLS + HTTP 升级 + RFC 6455 帧 + 单客户端，Swift stub 编译零告警）+ Android 原生 WSS（SSLServerSocket + 自定义 X509KeyManager，javac 桩编译通过）+ LocalServerSession 编排（CA 持久化/自动重签/端口回退，15 测试）+ Home「电脑腿连接」区块（地址复制/指纹/客户端态）+ SpikePage 测试 6 + scripts/trust-local-ca.sh（macOS security/Windows certutil，实机验证安装/指纹比对/幂等）+ SPEC §5.6/CONTEXT/ADR-0009 同步）；**待验项 = 真机**（T09 承接）：app 起服务器 → 桌面 Chrome 连入转发 SDP → 传文件 SHA-256 一致；CA 信任全链路；Windows Chrome + Bonjour `.local` 解析；iOS 后台/锁屏边界
+- 状态：✅ 代码完成（2026-08-17：spike 定机制 + cert.ts WebCrypto 自签（DER/X509 手工构建，Node/OpenSSL oracle 15 测试）+ 桥 API（startLocalServer/stopLocalServer/sendLocalMessage/getLocalAddresses + 3 事件，facade 校验 8 测试）+ iOS 原生 WSS（NWListener TLS + HTTP 升级 + RFC 6455 帧 + 单客户端，Swift stub 编译零告警）+ Android 原生 WSS（SSLServerSocket + 自定义 X509KeyManager，javac 桩编译通过）+ LocalServerSession 编排（CA 持久化/自动重签/端口回退，15 测试）+ Home「电脑端连接」区块（地址复制/指纹/客户端态）+ SpikePage 测试 6 + scripts/trust-local-ca.sh（macOS security/Windows certutil，实机验证安装/指纹比对/幂等）+ SPEC §5.6/CONTEXT/ADR-0009 同步）；**待验项 = 真机**（T09 承接）：app 起服务器 → 桌面 Chrome 连入转发 SDP → 传文件 SHA-256 一致；CA 信任全链路；Windows Chrome + Bonjour `.local` 解析；iOS 后台/锁屏边界
 - 阻塞：T01, T02
 - 被阻塞者：T08, T09
 - 引用：ADR-0009 决策 4/5；SPEC §5.6；.local-certs/（现有 CA）
@@ -18,7 +18,7 @@ app 原生层监听 WSS（默认 8443），供桌面 Chrome 主动连入；**只
 
 ## 备注
 - 证书机制选项（ADR-0009 决策 4 注释）：a) 按 IP 重签（桌面侧脚本，IP 变则重跑）b) CA 密钥随包（app 内自签，安全权衡：CA 仅服务本用户 LAN，可接受）c) `.local` SAN + 桌面解析 `.local` 能力验证（macOS mDNSResponder 原生；Windows 需 Bonjour；Chrome 解析行为待验）——T01 spike 后 30 分钟快验 Chromium 行为再拍板
-- 若证书摩擦不可接受 → 回到 ADR-0009 已接受的降级：电脑腿维持两跳 QR（app↔app 不受影响）
+- 若证书摩擦不可接受 → 回到 ADR-0009 已接受的降级：电脑端维持两跳 QR（app↔app 不受影响）
 - WSS 端口冲突/占用处理；同一 app 多网卡（WiFi+热点）地址展示选择
 
 ## Chromium 行为 spike 结论（2026-08-17，本机 playwright chromium-1200 实测）

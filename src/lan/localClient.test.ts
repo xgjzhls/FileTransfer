@@ -1,5 +1,5 @@
 /**
- * LocalServerClient 单测（T08 电脑腿 B / SPEC §5.6）—— 假 socket + 假 fetchInfo + 假 storage 注入：
+ * LocalServerClient 单测（T08 电脑端 B / SPEC §5.6）—— 假 socket + 假 fetchInfo + 假 storage 注入：
  * 覆盖：地址解析（完整 wss / 裸 ip:port / https:// / 非法）/ 持久化（记住/读取/清除）/
  * 连接生命周期（fetch 设备信息 → open → connected）／信令收发（wire 同构）/
  * 自动重连退避（断开 → reconnecting → 重连；attempts 归零）／放弃转 offline（迟到事件不复活）/

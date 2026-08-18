@@ -19,7 +19,7 @@
 - **托管**：GitHub Pages（当前 legacy + `/docs`，见 CONTEXT.md「部署现状」）
 - **iOS app 壳（ADR-0008）**：Capacitor 8 打包同一套 Web 代码（WKWebView 承载）；app 内导出走原生文件夹选择 + 分块流式写（见 §4），网页版形态不变
 - **局域网发现（ADR-0009）**：iOS+Android app 原生 mDNS/DNS-SD（`_localtranfer._tcp`，TXT 携带设备名/ID/信令端口），app↔app 离线免扫码直连；发现后经**原生信令通道**交换 SDP（信令「单协议多载体」扩展：WS / QR / 原生通道 / 本地 WSS）
-- **本地信令服务器（ADR-0009）**：app 原生层监听 WSS（默认 9443，证书由本地 CA 签发），供桌面 Chrome 主动连入（输一次地址记住）；**只转信令**，文件数据仍 WebRTC 直连 —— 电脑腿离线免两跳（端口与 app↔app TCP 信令 8443 分离，§5.6）
+- **本地信令服务器（ADR-0009）**：app 原生层监听 WSS（默认 9443，证书由本地 CA 签发），供桌面 Chrome 主动连入（输一次地址记住）；**只转信令**，文件数据仍 WebRTC 直连 —— 电脑端离线免两跳（端口与 app↔app TCP 信令 8443 分离，§5.6）
 
 ## 3. 传输协议
 
@@ -162,7 +162,7 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 - **安全**：同 LAN 直接可见可连（修订 ADR-0006 可见性门控；在线房间设备门控不变）；原生信令通道 v1 明文 TCP（LAN 信任模型下接受）；数据面 DTLS 不变
 - **边界**：AP 隔离 / 跨 VLAN 下 mDNS 失败 → 降级 QR；iOS 后台/锁屏监听受限（前台为主）；可见性开关默认开（设置可关，`lt.lanVisible`）
 
-### 5.6 本地信令服务器（电脑腿，ADR-0009）
+### 5.6 本地信令服务器（电脑端，ADR-0009）
 
 - **动机**：Chrome 网页无法被发现（纯浏览器限制），只能主动连接；https PWA → 明文 `ws://LAN-IP` 被 Chrome mixed content 硬拦（spike 实测：`Failed to construct WebSocket: insecure WebSocket connection may not be initiated from a page loaded over HTTPS`）；`http://IP` 顶级导航失去 secure context（OPFS 不可用）→ 必须 **WSS + 可信证书**。spike 另验证（2026-08-17，chromium-1200）：公开 https 页（GitHub Pages PWA）→ `wss://LAN-IP` 无 Private Network Access 拦截；Chrome（macOS）解析 `.local` 主机名（Windows 需 Bonjour，T09 真机验）
 - **服务器**：app 原生层监听（iOS NWListener + TLS / Android SSLServerSocket，默认 9443，PORT_IN_USE 依次试 9444/9445），WSS，**只转信令**（SDP/ICE 在 Chrome 网页与 app 内 WKWebView 之间转发）；文件数据仍 WebRTC 直连（不违反「数据不经过任何中间设备」）。**端口与 app↔app TCP 信令（8443）分离**，避免双监听冲突（T07 备注「WSS 端口冲突/占用处理」落地）
@@ -202,4 +202,4 @@ QR 文本 = base64url( gzip( { "v":1, "kind":"offer"|"answer", "sdp":"<sdp>" } )
 7. **离线 QR**：压缩 SDP + 两次扫码配对 + 离线续传
 8. **收尾**：照片门控、批量队列 UI、Wake Lock、孤儿清理集成、多端真机联调
 9. **iOS app 壳（T01-T05，ADR-0008）**：Capacitor 脚手架 + 原生文件夹选择插件（UIDocumentPicker `.folder` + security-scoped URL）+ 分块写桥（4 MiB 背压）+ `@capacitor/share` 替换分享（**已完成 2026-08-16：T01 壳一键构建/真机安装、T02 插件四原语 + writeTemp、T03 app 内三入口导出到文件夹（峰值内存 = 块大小、取消 = 停当前文件已写保留、重名消歧复用 FSA 逻辑）、T04 分享次级、T05 文档同步；spike 验证：sync handle 729MB/s、桥 177MB/s @4MiB、文件夹写入端到端通过**；JS 编码优化标 [v2]）
-10. **局域网发现 + 电脑腿（ADR-0009，tickets 见 `.scratch/lan-discovery/issues/`）**：T01 数据面 spike（WKWebView DataChannel 可用性，WebKit bug 174500）→ T02/T03 原生发现插件（iOS/Android，mDNS）→ T04 原生信令通道 → T05 app↔app 垂直打通 → T06 UI 双区块 + 可见性开关（ADR-0006 修订落地）→ T07 本地 WSS 服务器 + 证书 → T08 Chrome 端连接（输一次记住 + 降级 QR）→ T09 多端真机验收（离线主场景全链路）
+10. **局域网发现 + 电脑端（ADR-0009，tickets 见 `.scratch/lan-discovery/issues/`）**：T01 数据面 spike（WKWebView DataChannel 可用性，WebKit bug 174500）→ T02/T03 原生发现插件（iOS/Android，mDNS）→ T04 原生信令通道 → T05 app↔app 垂直打通 → T06 UI 双区块 + 可见性开关（ADR-0006 修订落地）→ T07 本地 WSS 服务器 + 证书 → T08 Chrome 端连接（输一次记住 + 降级 QR）→ T09 多端真机验收（离线主场景全链路）

@@ -52,7 +52,7 @@ public class CAPLanDiscoveryPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "connect", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "disconnect", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendMessage", returnType: CAPPluginReturnPromise),
-        // T07 本地 WSS 服务器（电脑腿 A，ADR-0009 决策 4）：只转信令
+        // T07 本地 WSS 服务器（电脑端 A，ADR-0009 决策 4）：只转信令
         CAPPluginMethod(name: "startLocalServer", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopLocalServer", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendLocalMessage", returnType: CAPPluginReturnPromise),
@@ -969,7 +969,7 @@ public class CAPLanDiscoveryPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     // =========================================================================
-    // 本地 WSS 服务器（T07 电脑腿 A，ADR-0009 决策 4 / SPEC §5.6）——
+    // 本地 WSS 服务器（T07 电脑端 A，ADR-0009 决策 4 / SPEC §5.6）——
     // WSS 作为桌面 Chrome 主动连入的信令宿主，只转信令（SDP/ICE），数据 WebRTC 直连。
     // =========================================================================
     //

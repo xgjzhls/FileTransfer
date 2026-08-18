@@ -381,7 +381,7 @@ export default function SpikePage() {
     }
   }
 
-  // ---- T07 本地 WSS 服务器探针（电脑腿 A：启动/地址/指纹/客户端/中继）----
+  // ---- T07 本地 WSS 服务器探针（电脑端 A：启动/地址/指纹/客户端/中继）----
   const [localServerProbe, setLocalServerProbe] = useState<{
     port: number
     urls: string[]
@@ -598,7 +598,7 @@ export default function SpikePage() {
         {lanLog.map((line, i) => <pre key={i} className="mono">{line}</pre>)}
       </Card>
 
-      <Card title="测试 6：本地 WSS 服务器（T07 电脑腿 A，仅 app 内）">
+      <Card title="测试 6：本地 WSS 服务器（T07 电脑端 A，仅 app 内）">
         <p>
           T07 验收：App 起本地 WSS 信令服务器（默认 9443，被占依次试 9444/9445）→ 桌面 Chrome 连
           <code className="mono">wss://&lt;地址&gt;/ws?device=&lt;deviceId&gt;</code>（证书由 App 自签，桌面一次性信任 CA）→ 双向交换

@@ -6,12 +6,12 @@
 - 引用：ADR-0009；SPEC §5.5/§5.6/§6/§8
 
 ## 目标
-ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主场景下两条腿都兑现，且既有在线路径无回归。
+ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主场景下两条链路都兑现，且既有在线路径无回归。
 
 ## 验收标准（done when）
 1. iOS app ↔ iOS app 离线传（免扫码）：1GB SHA-256 一致
 2. iOS app ↔ Android app 离线传（跨平台互发现）
-3. iOS app ↔ 桌面 Chrome 离线传（WSS 电脑腿，免两跳）：1GB SHA-256 一致
+3. iOS app ↔ 桌面 Chrome 离线传（WSS 电脑端，免两跳）：1GB SHA-256 一致
 4. 在线场景回归：自动回房（ADR-0006）/ 房间设备列表 / 在线传输不受影响
 5. 可见性开关：关闭后双向不可见；重启保持；重新开启恢复
 6. QR 兜底回归：AP 隔离 / 服务器不可达场景降级 QR 两跳仍可用
@@ -33,7 +33,7 @@ ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主�
 ### 0. 设备准备（一次性）
 - **iPhone ×2**：`bash scripts/ios-deploy.sh`（Xcode 16+ 个人免费签名；首装后 设置 → 通用 → VPN 与设备管理 → 信任）。签名 7 天过期需重签。
 - **Android 手机**（跨平台腿）：`npm run build:app && npx cap sync android && cd android && ./gradlew assembleDebug`（AGP 8.13.0 / Gradle 8.14.3 / JDK 21+；本机 Java 25 可能需降级，T03 备注）→ 数据线 `./gradlew installDebug` 或侧载 apk。Android 13+ 首次打开需授予「附近设备」权限（NEARBY_WIFI_DEVICES，T03）。
-- **桌面 Chrome**（电脑腿）：先联网打开一次 GitHub Pages PWA（https://xgjzhls.github.io/FileTransfer/，bootstrap + SW 缓存），之后可断外网。
+- **桌面 Chrome**（电脑端）：先联网打开一次 GitHub Pages PWA（https://xgjzhls.github.io/FileTransfer/，bootstrap + SW 缓存），之后可断外网。
 - **1GB 测试文件**：离线前在桌面生成并预存哈希：
   ```bash
   dd if=/dev/urandom of=/tmp/t09-1g.bin bs=1m count=1024
@@ -47,7 +47,7 @@ ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主�
 3. 点选对方设备 → 原生信令建连 → 传输区出现。传 `/tmp/t09-1g.bin`（从另一台设备的文件输入选择）。
 4. 完成后：接收端应用内校验全绿；导出到「文件」App，快捷指令 SHA-256 比对 == 预存值。
 5. **反向再传一次**（换 sender；双发起双向均应可连，T05 契约）。
-6. 判据：两条腿 1GB SHA-256 一致，全程零扫码、零外网。
+6. 判据：两条链路 1GB SHA-256 一致，全程零扫码、零外网。
 
 ### 2. iOS ↔ Android 离线传（跨平台互发现）— 验收 2
 1. 同网络同离线。iPhone 与 Android 打开 app。
@@ -55,8 +55,8 @@ ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主�
 3. 双向各传一个 ~100MB 文件：应用内校验全绿（跨平台 WebRTC 数据面）。
 4. 失败时降级路径：QR 两跳仍应可用（见验收 6），并记录为阻断项。
 
-### 3. iOS ↔ 桌面 Chrome 离线传（WSS 电脑腿）— 验收 3
-1. iPhone app 首页「电脑腿连接」区块：记录地址 `wss://<ip>:9443/ws?device=<id>` 与 **CA 指纹**。
+### 3. iOS ↔ 桌面 Chrome 离线传（WSS 电脑端）— 验收 3
+1. iPhone app 首页「电脑端连接」区块：记录地址 `wss://<ip>:9443/ws?device=<id>` 与 **CA 指纹**。
 2. 桌面一次性信任 CA（重启 Chrome 生效）：
    ```bash
    bash scripts/trust-local-ca.sh https://<ip>:9443/ca.crt <CA指纹>
@@ -90,7 +90,7 @@ ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主�
 1. iOS↔iOS 传一个 ≥500MB 文件，传输中途**杀掉 sender app**（或对端开飞行模式模拟断连）。
 2. 重开 app → 重新发现 → 点选重连 → 传输自动从 bitfield 断点继续（§3.4：已收 64MiB 块不重传；进度从接近断点处起跳）。
 3. 完成后：应用内校验全绿；整体 SHA-256 == 预存值（续传不损坏数据）。
-4. 电脑腿同法复验一次（桌面断 WSS → 重连 → 续传）。
+4. 电脑端同法复验一次（桌面断 WSS → 重连 → 续传）。
 
 ### 记录格式
 逐条记录：`验收 N：PASS / FAIL（现象 + 复现步骤）/ 未测`。FAIL 项在 `## Comments` 登记并阻塞 close；全部 PASS 后把本票状态改为 `已完成`。
@@ -105,7 +105,7 @@ ADR-0009 全链路真机验收，确认「完全离线（无互联网）」主�
 |---|---|---|---|
 | 服务类型 `_localtranfer._tcp` + TXT name/id/kind/port/ver | SPEC §5.5 / CONTEXT / ADR-0009 | `plugins/lan-discovery/src/txt.ts`（SERVICE_TYPE + TXT schema） | ✓ 无漂移 |
 | app↔app 原生信令 TCP 默认 8443，被占试 8444/8445 | SPEC §5.5 | `src/lan/lanSession.ts:41` + `plugins/lan-discovery/src/index.ts` | ✓ 无漂移 |
-| WSS 电脑腿默认 9443，被占试 9444/9445（与 8443 分离） | SPEC §5.6 / CONTEXT | `plugins/lan-discovery/src/index.ts:129-134`（DEFAULT_LOCAL_SERVER_PORT=9443）；iOS/Android 原生同步 | ✓ 无漂移 |
+| WSS 电脑端默认 9443，被占试 9444/9445（与 8443 分离） | SPEC §5.6 / CONTEXT | `plugins/lan-discovery/src/index.ts:129-134`（DEFAULT_LOCAL_SERVER_PORT=9443）；iOS/Android 原生同步 | ✓ 无漂移 |
 | 叶证书 SAN = `DNS:<deviceId>.local` + 当前 IP + 127.0.0.1，按启动/网络变更重签 | T07 / SPEC §5.6 / CONTEXT | `src/lan/cert.ts`（sanExtensionValue + 自动重签逻辑）、`src/lan/localServer.ts:311` | ✓ 无漂移 |
 | `GET /` 与 `/ca.crt` 带 CORS 头 | T08 / SPEC §5.6 | iOS Swift:1329 / Android Java:1942 `Access-Control-Allow-Origin: *` | ✓ 无漂移 |
 | 可见性开关 `lt.lanVisible` 默认开、关 = 不广告不浏览、重启保持 | SPEC §5.5/§6 / CONTEXT / ADR-0009 | `src/lan/visibility.ts` + `src/pages/Settings.tsx:166` + `src/pages/Home.tsx:285`（会话生命周期门控） | ✓ 无漂移 |

@@ -1,5 +1,5 @@
 /**
- * LocalServerSession —— app 本地 WSS 信令服务器会话（T07 电脑腿 A，ADR-0009 决策 4）。
+ * LocalServerSession —— app 本地 WSS 信令服务器会话（T07 电脑端 A，ADR-0009 决策 4）。
  *
  * 职责（在 cert.ts + 原生桥之上的一层编排）：
  * - CA 生成/持久化：首次启动 WebCrypto 生成，`lt.localCa*`（localStorage）持久化

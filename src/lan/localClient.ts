@@ -1,5 +1,5 @@
 /**
- * LocalServerClient —— 桌面 Chrome 本地服务器信令客户端（T08 电脑腿 B，ADR-0009 决策 5）。
+ * LocalServerClient —— 桌面 Chrome 本地服务器信令客户端（T08 电脑端 B，ADR-0009 决策 5）。
  *
  * LocalServerSession（app 侧，T07）的浏览器端对偶：桌面上没有原生插件可用
  * （web 降级明确拒绝，见 plugins/lan-discovery/src/web.ts），全部用浏览器能力：
@@ -224,7 +224,7 @@ export class LocalServerClient {
   connect(input: string): void {
     const parsed = parseLocalServerUrl(input)
     if (!parsed) {
-      this.events.onError('地址格式不正确：请从 app 首页「电脑腿连接」复制完整地址（wss://主机:端口/ws?device=…）')
+      this.events.onError('地址格式不正确：请从 app 首页「电脑端连接」复制完整地址（wss://主机:端口/ws?device=…）')
       return
     }
     this.close()
@@ -291,7 +291,7 @@ export class LocalServerClient {
       if (!parsed.deviceId) {
         // 裸地址输入：没有设备 id 就无法拼 wss 地址 → 明确失败
         this.giveUp(
-          `无法获取手机设备信息（${e instanceof Error ? e.message : String(e)}）：请确认手机 App 首页「电脑腿连接」正在运行、`
+          `无法获取手机设备信息（${e instanceof Error ? e.message : String(e)}）：请确认手机 App 首页「电脑端连接」正在运行、`
           + `手机与电脑在同一 Wi-Fi；首次使用需先运行 scripts/trust-local-ca.sh 信任证书，然后从 App 复制完整地址。`,
         )
         return
@@ -344,7 +344,7 @@ export class LocalServerClient {
     this.attempts++
     if (this.attempts > this.maxAttempts) {
       this.giveUp(
-        '连接失败（多次重试）：请确认手机 App 首页「电脑腿连接」正在运行、手机与电脑在同一 Wi-Fi；'
+        '连接失败（多次重试）：请确认手机 App 首页「电脑端连接」正在运行、手机与电脑在同一 Wi-Fi；'
         + '首次使用需先运行 scripts/trust-local-ca.sh 信任证书；若 IP 已变（DHCP）请重新输入地址。',
       )
       return
