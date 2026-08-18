@@ -20,9 +20,9 @@
 1. **局域网发现（app↔app）**：iOS+Android app 原生层 mDNS/DNS-SD 发现（服务类型 `_localtranfer._tcp`，TXT 携带设备名/ID/类型/信令端口/版本；iOS Network.framework NWAdvertiser/NWBrowser；Android NsdManager）。发现后发起方经**原生信令通道**（TCP 直连对端信令端口）交换 SDP/ICE——信令「单协议多载体」扩展为：WS / QR / 原生通道 / 本地 WSS 四种载体共用 `signal.payload`。
 2. **同 LAN 直接可见可连（修订 ADR-0006）**：局域网发现列表无需 PIN 门控，物理同在局域网即信任，点选即连；传输仍 WebRTC DTLS 加密；**可见性开关默认开、设置页可关**（关 = 不出现在他人列表、也不主动发现）。在线房间设备仍受 ADR-0006 PIN 门控（房间码即凭证）不变。
 3. **数据面先 spike 再定**：T01 spike 验证 WKWebView（Capacitor）内 RTCPeerConnection + DataChannel 可用性（建连 / bug 174500 权限 / 吞吐）。分支 A（可用）：原生只管发现+信令，传输/续传/分块/OPFS 全复用现有栈；分支 B（不可用）：app↔app 原生 TCP 数据面（传输协议在原生层或桥接实现），**电脑腿顺延**。
-4. **电脑腿 = app 本地信令服务器**：app 原生层监听 WSS（默认 8443），桌面 Chrome 网页主动连入；服务器**只转信令**（SDP/ICE），文件数据仍 WebRTC 直连——不违反「数据不经过任何中间设备」约束（app 是端点，非第三方中继）。证书用 `.local-certs` CA 签发，**桌面 Chrome 一次性信任 CA**（脚本化；非桌面应用，不破「零安装」）。
+4. **电脑腿 = app 本地信令服务器**：app 原生层监听 WSS（**默认 9443**，被占依次试 9444/9445），桌面 Chrome 网页主动连入；服务器**只转信令**（SDP/ICE），文件数据仍 WebRTC 直连——不违反「数据不经过任何中间设备」约束（app 是端点，非第三方中继）。证书用 `.local-certs` CA 签发，**桌面 Chrome 一次性信任 CA**（脚本化；非桌面应用，不破「零安装」）。
 
-   > **决策 4 落地（T07 spike 2026-08-17 拍板，见 T07 备注）**：app 内自签为主体——CA 首次启动 WebCrypto 生成并持久化（CA 不变 → 桌面只信任一次），叶证书按启动/网络变更自动重签，SAN = `DNS:<deviceId>.local` + 当前接口 IP + 127.0.0.1；`.local` SAN + 桌面解析（macOS 已验证）使 DHCP 换 IP 免重签。`security add-trusted-cert`（macOS）/ `certutil`（Windows）脚本化信任。
+   > **决策 4 落地（T07 spike 2026-08-17 拍板，见 T07 备注）**：**WSS 端口定为 9443 而非初稿的 8443**——与 app↔app 原生信令 TCP 端口（8443，SPEC §5.5）分离，避免双监听冲突（SPEC §5.6 / CONTEXT 同步）；app 内自签为主体——CA 首次启动 WebCrypto 生成并持久化（CA 不变 → 桌面只信任一次），叶证书按启动/网络变更自动重签，SAN = `DNS:<deviceId>.local` + 当前接口 IP + 127.0.0.1；`.local` SAN + 桌面解析（macOS 已验证）使 DHCP 换 IP 免重签。`security add-trusted-cert`（macOS）/ `certutil`（Windows）脚本化信任。
 5. **地址发现（电脑腿）**：app 界面显示地址（IP:port），Chrome 输一次存 `lt.localServer`，重开自动重连；DHCP 换 IP 重输；失败降级现有 QR 流程。
 6. **UI**：设备列表分「在线房间」「局域网发现」两个区块（来源标注）；在线场景沿用自动回房（ADR-0006），在线房间为主、局域网区块仍显示（app 端）；信令不可达（离线）时局域网区块为主（自动聚焦）。桌面端浏览器无 mDNS 能力，显示「本地服务器连接的设备」区块（T08 接入后列出电脑设备）。
 7. **平台**：iOS + Android 同步实现发现插件（跨平台 mDNS 互操作是最大技术风险，T03 真机验证）。
